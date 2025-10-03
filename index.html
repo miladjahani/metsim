@@ -3,95 +3,576 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>آنالیز دانه‌بندی مصالح</title>
-    <link rel="stylesheet" href="style.css">
+    <title>شبیه‌ساز تعاملی هیپ لیچینگ مس با متسیم</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chosen Palette: Industrial Blue & Earth Tones -->
+    <!-- Application Structure Plan: The SPA is designed as an interactive learning journey, not a mirror of the report's chapters. It uses a top-down approach: 1. A visual overview of the physical process. 2. An interactive simulator to explore key parameters and their kinetic effects. 3. A comparative analysis of pre-defined scenarios. 4. A reference section for chemical details. This structure guides the user from the big picture to specific details, making the complex information more digestible and engaging than a linear text format. Navigation is handled by a sticky header for easy access to all sections. -->
+    <!-- Visualization & Content Choices:
+        - Leaching Process: Report Info (Chapter 2) -> Goal: Organize -> Viz: Interactive HTML/CSS flow diagram -> Interaction: Click on a stage to reveal a detailed description card -> Justification: Breaks down a complex process into manageable, explorable steps.
+        - METSIM Simulation: Report Info (Chapters 8, 9, 11) -> Goal: Change/Relationships -> Viz: Dynamic line charts (Chart.js) for recovery and concentration -> Interaction: Sliders for ore grade and irrigation rate dynamically update the charts -> Justification: Provides a hands-on "feel" for how parameters influence outcomes, which is the core of simulation.
+        - Scenario Analysis: Report Info (Table 5, Chapter 12) -> Goal: Compare -> Viz: Bar chart (Chart.js) -> Interaction: Buttons to select scenarios and highlight corresponding data -> Justification: Clearly visualizes the trade-offs discussed in the report, making the analysis conclusion more impactful.
+        - Key Minerals: Report Info (Chapter 3) -> Goal: Inform -> Viz: Card-based layout for chemical reactions -> Justification: Presents reference information in a clean, visually organized manner that is easier to scan than a table.
+        - Library/Method: Chart.js for all visualizations on Canvas, Tailwind CSS for layout, Vanilla JS for all logic.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background-color: #f8f9fa;
+            color: #343a40;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+            height: 350px;
+            max-height: 45vh;
+        }
+        .rtl-dir {
+            direction: rtl;
+        }
+        .ltr-dir {
+            direction: ltr;
+        }
+        .smooth-scroll {
+            scroll-behavior: smooth;
+        }
+        .nav-link {
+            transition: color 0.3s, border-bottom-color 0.3s;
+            border-bottom: 2px solid transparent;
+        }
+        .nav-link:hover, .nav-link.active {
+            color: #007bff;
+            border-bottom-color: #007bff;
+        }
+        .card {
+            background-color: white;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -2px rgb(0 0 0 / 0.1);
+        }
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            transition: background-color 0.3s, transform 0.2s;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+            transform: scale(1.05);
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        .btn-secondary.active, .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+        .katex-display {
+            text-align: center !important;
+            direction: ltr;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+        }
+        .modal-overlay.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+        .modal-content {
+            background: white;
+            padding: 2rem;
+            border-radius: 0.75rem;
+            max-width: 90%;
+            width: 600px;
+            max-height: 90vh;
+            overflow-y: auto;
+            transform: scale(0.95);
+            transition: transform 0.3s;
+        }
+         .modal-overlay.visible .modal-content {
+            transform: scale(1);
+        }
+    </style>
 </head>
-<body>
-    <header>
-        <h1>آنالیز دانه‌بندی مصالح</h1>
-        <div class="header-buttons">
-            <button id="export-pdf">خروجی PDF</button>
-            <button id="export-excel">خروجی Excel</button>
-        </div>
+<body class="smooth-scroll">
+
+    <header id="header" class="bg-white/80 backdrop-blur-sm shadow-md sticky top-0 z-40 rtl-dir">
+        <nav class="container mx-auto px-6 py-3 flex justify-between items-center">
+            <div class="font-bold text-xl text-gray-800">
+                <span class="text-blue-600">متسیم</span> آموز
+            </div>
+            <div class="hidden md:flex items-center space-x-reverse space-x-6">
+                <a href="#intro" class="nav-link px-3 py-2">مقدمه</a>
+                <a href="#process" class="nav-link px-3 py-2">فرآیند لیچینگ</a>
+                <a href="#simulation" class="nav-link px-3 py-2">شبیه‌سازی تعاملی</a>
+                <a href="#analysis" class="nav-link px-3 py-2">تحلیل سناریو</a>
+                <a href="#minerals" class="nav-link px-3 py-2">کانی‌شناسی</a>
+            </div>
+        </nav>
     </header>
 
-    <main class="container">
-        <div class="tabs">
-            <button class="tab-link active" onclick="openTab(event, 'image-analysis')">۱. تحلیل تصویری</button>
-            <button class="tab-link" onclick="openTab(event, 'sieve-analysis')">۲. ورود اطلاعات سرندها</button>
-        </div>
-
-        <!-- Tab: Image-based Analysis -->
-        <div id="image-analysis" class="tab-content active">
-            <h2>راهنمای تصویربرداری</h2>
-            <p>
-                - عکس را از فاصله حدود ۱ متری و عمود بر سطح بگیرید.
-                - یک جسم مرجع با اندازه مشخص (مانند سکه) کنار مصالح قرار دهید.
-                - برای دقت بیشتر، در حالت "دستی" یک خط بر روی قطر جسم مرجع رسم کنید.
-            </p>
-            <div class="upload-section">
-                <label for="imageUpload">۱. آپلود تصویر مصالح:</label>
-                <input type="file" id="imageUpload" accept="image/*">
+    <main>
+        <section id="intro" class="py-20 bg-gray-50 rtl-dir">
+            <div class="container mx-auto px-6 text-center">
+                <h1 class="text-4xl md:text-5xl font-bold text-gray-800 mb-4">شبیه‌سازی فرآیند هیپ لیچینگ مس</h1>
+                <p class="text-lg text-gray-600 max-w-3xl mx-auto mb-8">
+                    این اپلیکیشن یک راهنمای تعاملی برای درک و شبیه‌سازی فرآیند هیپ لیچینگ مس اکسیدی با استفاده از مفاهیم کلیدی نرم‌افزار متسیم است. به جای خواندن متن‌های طولانی، پارامترها را تغییر دهید و تأثیر آن را به صورت زنده بر روی نمودارها مشاهده کنید.
+                </p>
+                <a href="#process" class="btn btn-primary">شروع یادگیری</a>
             </div>
-            <div class="reference-section">
-                <label for="ref-diameter">۲. قطر واقعی جسم مرجع (میلی‌متر):</label>
-                <input type="number" id="ref-diameter" value="24.26">
-                <p>روی تصویر کلیک کرده و بکشید تا خطی بر روی قطر جسم مرجع رسم شود.</p>
+        </section>
+
+        <section id="process" class="py-20 rtl-dir">
+            <div class="container mx-auto px-6">
+                <h2 class="text-3xl font-bold text-center mb-4">فرآیند کامل هیپ لیچینگ</h2>
+                <p class="text-md text-gray-600 text-center max-w-2xl mx-auto mb-12">
+                    فرآیند استحصال مس به روش هیپ لیچینگ یک زنجیره عملیاتی یکپارچه است. روی هر مرحله کلیک کنید تا جزئیات آن را مشاهده نمایید.
+                </p>
+                <div class="flex flex-col md:flex-row items-center justify-center space-y-4 md:space-y-0 md:space-x-4 md:space-x-reverse">
+                    <div class="process-step card p-4 text-center w-48" data-title="خردایش (Crushing)" data-content="اولین گام پس از استخراج، کاهش اندازه ذرات کانسنگ برای افزایش سطح تماس بین کانی‌های مس و محلول لیچینگ است. معمولاً کانسنگ تا ابعاد کمتر از ۲۵ میلی‌متر خرد می‌شود.">
+                        <div class="text-4xl mb-2">⛏️</div>
+                        <h3 class="font-semibold">خردایش</h3>
+                    </div>
+                    <div class="text-2xl text-gray-400 hidden md:block">➔</div>
+                    <div class="process-step card p-4 text-center w-48" data-title="آگلومراسیون (Agglomeration)" data-content="برای کانسنگ‌های حاوی نرمه و رس، از آگلومراسیون برای چسباندن ذرات ریز به ذرات درشت‌تر استفاده می‌شود. این کار با افزودن آب و اسید در یک درام چرخان انجام شده و نفوذپذیری هیپ را بهبود می‌بخشد.">
+                        <div class="text-4xl mb-2">🔄</div>
+                        <h3 class="font-semibold">آگلومراسیون</h3>
+                    </div>
+                    <div class="text-2xl text-gray-400 hidden md:block">➔</div>
+                    <div class="process-step card p-4 text-center w-48" data-title="انباشت (Stacking)" data-content="کانسنگ آماده‌شده توسط نوار نقاله‌ها بر روی یک سطح نفوذناپذیر (پد) انباشته می‌شود. روش انباشت باید از تراکم ناهمگون جلوگیری کند تا از ایجاد مسیرهای ترجیحی برای جریان محلول جلوگیری شود.">
+                        <div class="text-4xl mb-2">⛰️</div>
+                        <h3 class="font-semibold">انباشت هیپ</h3>
+                    </div>
+                    <div class="text-2xl text-gray-400 hidden md:block">➔</div>
+                     <div class="process-step card p-4 text-center w-48" data-title="آبیاری (Irrigation)" data-content="محلول اسید سولفوریک رقیق (رافینت) به طور یکنواخت بر سطح هیپ پاشیده می‌شود. محلول در توده نفوذ کرده، کانی‌های مس را حل می‌کند و به سمت پایین حرکت می‌کند.">
+                        <div class="text-4xl mb-2">💧</div>
+                        <h3 class="font-semibold">آبیاری</h3>
+                    </div>
+                    <div class="text-2xl text-gray-400 hidden md:block">➔</div>
+                    <div class="process-step card p-4 text-center w-48" data-title="مدار SX/EW" data-content="محلول باردار (PLS) جمع‌آوری شده، در مرحله استخراج با حلال (SX) خالص‌سازی و تغلیظ می‌شود. سپس در مرحله پالایش الکتریکی (EW)، مس با خلوص بالا (۹۹.۹۹٪) به صورت کاتد رسوب داده می‌شود.">
+                        <div class="text-4xl mb-2">⚡️</div>
+                        <h3 class="font-semibold">SX/EW</h3>
+                    </div>
+                </div>
             </div>
-            <div class="canvas-container">
-                <canvas id="imageCanvas"></canvas>
+        </section>
+
+        <section id="simulation" class="py-20 bg-gray-50 rtl-dir">
+            <div class="container mx-auto px-6">
+                <h2 class="text-3xl font-bold text-center mb-4">شبیه‌ساز سینتیک لیچینگ</h2>
+                <p class="text-md text-gray-600 text-center max-w-3xl mx-auto mb-12">
+                    در متسیم، سینتیک لیچینگ با کالیبره کردن مدل بر اساس داده‌های آزمایشگاهی (تست ستونی) شبیه‌سازی می‌شود. در اینجا می‌توانید تأثیر پارامترهای کلیدی بر منحنی بازیابی مس و غلظت محلول خروجی (PLS) را به صورت تعاملی مشاهده کنید.
+                </p>
+                <div class="grid md:grid-cols-3 gap-8 items-start">
+                    <div class="md:col-span-1 card p-6">
+                        <h3 class="text-xl font-semibold mb-4">پارامترهای ورودی</h3>
+                        <div class="space-y-6">
+                            <div>
+                                <label for="oreGrade" class="block mb-2 font-medium text-gray-700">عیار مس ورودی (%)</label>
+                                <input type="range" id="oreGrade" min="0.5" max="2.5" value="1.2" step="0.1" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                                <div class="text-center mt-1 font-semibold text-blue-600"><span id="oreGradeValue">1.2</span> %</div>
+                            </div>
+                            <div>
+                                <label for="irrigationRate" class="block mb-2 font-medium text-gray-700">نرخ آبیاری (L/h/m²)</label>
+                                <input type="range" id="irrigationRate" min="5" max="15" value="10" step="1" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                                <div class="text-center mt-1 font-semibold text-blue-600"><span id="irrigationRateValue">10</span> L/h/m²</div>
+                            </div>
+                             <div>
+                                <label for="fastLeachFraction" class="block mb-2 font-medium text-gray-700">کسر بخش سریع‌الحل (%)</label>
+                                <input type="range" id="fastLeachFraction" min="40" max="90" value="70" step="5" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                                <div class="text-center mt-1 font-semibold text-blue-600"><span id="fastLeachFractionValue">70</span> %</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="md:col-span-2 card p-6">
+                        <h3 class="text-xl font-semibold mb-4 text-center">نمودارهای خروجی</h3>
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div class="chart-container"><canvas id="recoveryChart"></canvas></div>
+                            <div class="chart-container"><canvas id="plsChart"></canvas></div>
+                        </div>
+                         <p class="text-sm text-gray-500 mt-4 text-center">
+                            تغییر پارامترها را امتحان کنید. مشاهده کنید که چگونه افزایش عیار، غلظت PLS را بالا می‌برد یا چگونه نرخ آبیاری بالاتر، زمان رسیدن به بازیابی نهایی را کوتاه‌تر می‌کند.
+                        </p>
+                    </div>
+                </div>
             </div>
-            <button id="process-image-btn">۳. پردازش تصویر و محاسبه دانه‌بندی</button>
-        </div>
+        </section>
 
-        <!-- Tab: Sieve Data Entry -->
-        <div id="sieve-analysis" class="tab-content">
-            <h2>ورود دستی داده‌های سرند</h2>
-            <table id="sieve-table">
-                <thead>
-                    <tr>
-                        <th>نام سرند</th>
-                        <th>اندازه سرند (میکرومتر)</th>
-                        <th>وزن باقی‌مانده (گرم)</th>
-                        <th>عملیات</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <!-- Rows will be added dynamically -->
-                </tbody>
-            </table>
-            <button id="add-sieve-row">افزودن سرند</button>
-            <button id="calculate-sieve-btn">محاسبه</button>
-        </div>
-
-        <!-- Results Section -->
-        <div class="results-container">
-            <h2>۳. نتایج آنالیز</h2>
-            <div class="results-grid">
-                <p><strong>D10:</strong> <span id="d10-val">-</span></p>
-                <p><strong>D30:</strong> <span id="d30-val">-</span></p>
-                <p><strong>D50 (Median):</strong> <span id="d50-val">-</span></p>
-                <p><strong>D60:</strong> <span id="d60-val">-</span></p>
-                <p><strong>ضریب یکنواختی (Cu):</strong> <span id="cu-val">-</span></p>
-                <p><strong>ضریب انحنا (Cc):</strong> <span id="cc-val">-</span></p>
+        <section id="analysis" class="py-20 rtl-dir">
+            <div class="container mx-auto px-6">
+                <h2 class="text-3xl font-bold text-center mb-4">تحلیل سناریو: تأثیر نرخ آبیاری</h2>
+                 <p class="text-md text-gray-600 text-center max-w-3xl mx-auto mb-12">
+                    یکی از کاربردهای اصلی شبیه‌سازی، تحلیل "چه-اگر" (What-if) است. در اینجا، سه سناریو برای نرخ آبیاری مختلف مقایسه شده‌اند. با انتخاب هر سناریو، نتایج آن را بر روی زمان چرخه و اوج غلظت PLS مشاهده کنید و به مبادله (trade-off) بین این دو پارامتر توجه کنید.
+                </p>
+                <div class="flex justify-center space-x-4 space-x-reverse mb-8">
+                    <button class="btn btn-secondary scenario-btn" data-scenario="0">پایین (8 L/h/m²)</button>
+                    <button class="btn btn-secondary scenario-btn active" data-scenario="1">پایه (10 L/h/m²)</button>
+                    <button class="btn btn-secondary scenario-btn" data-scenario="2">بالا (12 L/h/m²)</button>
+                </div>
+                <div class="card p-6 max-w-4xl mx-auto">
+                     <div class="chart-container h-96 max-h-[50vh]"><canvas id="analysisChart"></canvas></div>
+                </div>
+                 <div id="analysis-text" class="mt-6 text-center text-gray-700 max-w-3xl mx-auto p-4 bg-gray-100 rounded-lg">
+                    <!-- Text will be updated by JS -->
+                </div>
             </div>
-        </div>
+        </section>
 
-        <!-- Chart Section -->
-        <div class="chart-container">
-            <h2>۴. نمودار دانه‌بندی</h2>
-            <canvas id="resultChart"></canvas>
-        </div>
-
-        <!-- Loading Spinner -->
-        <div id="loading" class="hidden">
-            <div class="spinner"></div>
-            <p>در حال پردازش...</p>
-        </div>
+        <section id="minerals" class="py-20 bg-gray-50 rtl-dir">
+            <div class="container mx-auto px-6">
+                <h2 class="text-3xl font-bold text-center mb-4">کانی‌های کلیدی مس اکسیدی و واکنش‌ها</h2>
+                 <p class="text-md text-gray-600 text-center max-w-2xl mx-auto mb-12">
+                    درک شیمی فرآیند برای تعریف صحیح واکنش‌ها در متسیم ضروری است. در اینجا واکنش انحلال مهم‌ترین کانی‌های مس اکسیدی در اسید سولفوریک آورده شده است.
+                </p>
+                <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <div class="card p-6">
+                        <h3 class="text-xl font-semibold mb-2">مالاکیت</h3>
+                        <p class="text-sm text-gray-500 mb-4">$Cu_2(OH)_2CO_3$</p>
+                        <div class="bg-gray-100 p-3 rounded ltr-dir text-sm">
+                            $Cu_2(OH)_2CO_3 + 2H_2SO_4 \rightarrow 2CuSO_4 + 3H_2O + CO_2$
+                        </div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xl font-semibold mb-2">آزوریت</h3>
+                        <p class="text-sm text-gray-500 mb-4">$Cu_3(CO_3)_2(OH)_2$</p>
+                        <div class="bg-gray-100 p-3 rounded ltr-dir text-sm">
+                            $Cu_3(CO_3)_2(OH)_2 + 3H_2SO_4 \rightarrow 3CuSO_4 + 2CO_2 + 4H_2O$
+                        </div>
+                    </div>
+                    <div class="card p-6">
+                        <h3 class="text-xl font-semibold mb-2">کریسوکولا</h3>
+                        <p class="text-sm text-gray-500 mb-4">$CuSiO_3 \cdot 2H_2O$</p>
+                        <div class="bg-gray-100 p-3 rounded ltr-dir text-sm">
+                            $CuSiO_3 \cdot 2H_2O + H_2SO_4 \rightarrow CuSO_4 + SiO_2 + 3H_2O$
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
     </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script async src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady();"></script>
-    <script src="script.js"></script>
+    <footer class="bg-gray-800 text-white py-8 rtl-dir">
+        <div class="container mx-auto px-6 text-center">
+            <p>این اپلیکیشن تعاملی بر اساس گزارش "آموزش تخصصی متسیم برای هیپ لیچینگ مس اکسیدی" ساخته شده است.</p>
+            <p class="text-sm mt-2 opacity-70">طراحی و پیاده‌سازی شده برای نمایش قابلیت‌های تبدیل محتوای فنی به ابزارهای یادگیری تعاملی.</p>
+        </div>
+    </footer>
+
+    <div id="processModal" class="modal-overlay">
+        <div class="modal-content rtl-dir">
+            <h3 id="modalTitle" class="text-2xl font-bold mb-4"></h3>
+            <p id="modalContent" class="text-gray-700"></p>
+            <button id="closeModal" class="btn btn-primary mt-6 float-left">بستن</button>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+
+        // --- Navigation ---
+        const navLinks = document.querySelectorAll('.nav-link');
+        const sections = document.querySelectorAll('main section');
+
+        const observerOptions = {
+            root: null,
+            rootMargin: '0px',
+            threshold: 0.5
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    navLinks.forEach(link => {
+                        link.classList.remove('active');
+                        if (link.getAttribute('href').substring(1) === entry.target.id) {
+                            link.classList.add('active');
+                        }
+                    });
+                }
+            });
+        }, observerOptions);
+
+        sections.forEach(section => {
+            observer.observe(section);
+        });
+
+        // --- Process Steps Modal ---
+        const processSteps = document.querySelectorAll('.process-step');
+        const modal = document.getElementById('processModal');
+        const modalTitle = document.getElementById('modalTitle');
+        const modalContent = document.getElementById('modalContent');
+        const closeModal = document.getElementById('closeModal');
+
+        processSteps.forEach(step => {
+            step.addEventListener('click', () => {
+                modalTitle.textContent = step.dataset.title;
+                modalContent.textContent = step.dataset.content;
+                modal.classList.add('visible');
+            });
+        });
+
+        const hideModal = () => modal.classList.remove('visible');
+        closeModal.addEventListener('click', hideModal);
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                hideModal();
+            }
+        });
+
+        // --- Interactive Simulation ---
+        const oreGradeSlider = document.getElementById('oreGrade');
+        const irrigationRateSlider = document.getElementById('irrigationRate');
+        const fastLeachFractionSlider = document.getElementById('fastLeachFraction');
+        const oreGradeValue = document.getElementById('oreGradeValue');
+        const irrigationRateValue = document.getElementById('irrigationRateValue');
+        const fastLeachFractionValue = document.getElementById('fastLeachFractionValue');
+
+        const recoveryCtx = document.getElementById('recoveryChart').getContext('2d');
+        const plsCtx = document.getElementById('plsChart').getContext('2d');
+        let recoveryChart, plsChart;
+
+        function simplifiedKinetics(params) {
+            const { oreGrade, irrigationRate, fastFraction, totalTime, timeStep } = params;
+
+            const k_fast = 0.05 * (irrigationRate / 10);
+            const k_slow = 0.008 * (irrigationRate / 10);
+            const maxRecovery = 0.85;
+
+            let time = [];
+            let recovery = [];
+            let plsConcentration = [];
+
+            let currentRecovery = 0;
+            let fastLeachComponent = fastFraction * maxRecovery;
+            let slowLeachComponent = (1 - fastFraction) * maxRecovery;
+
+            for (let t = 0; t <= totalTime; t += timeStep) {
+                time.push(t);
+
+                const rec_fast = fastLeachComponent * (1 - Math.exp(-k_fast * t));
+                const rec_slow = slowLeachComponent * (1 - Math.exp(-k_slow * t));
+                currentRecovery = rec_fast + rec_slow;
+                recovery.push(currentRecovery * 100);
+
+                const dRec_dt_fast = k_fast * (fastLeachComponent - rec_fast);
+                const dRec_dt_slow = k_slow * (slowLeachComponent - rec_slow);
+                const dRec_dt = dRec_dt_fast + dRec_dt_slow;
+
+                const pls = (oreGrade * 10 * dRec_dt * 1000) / irrigationRate; // Simplified relationship
+                plsConcentration.push(Math.min(pls, oreGrade * 1.5));
+            }
+            return { time, recovery, plsConcentration };
+        }
+
+        function createOrUpdateCharts() {
+            const params = {
+                oreGrade: parseFloat(oreGradeSlider.value),
+                irrigationRate: parseFloat(irrigationRateSlider.value),
+                fastFraction: parseFloat(fastLeachFractionSlider.value) / 100,
+                totalTime: 350,
+                timeStep: 5
+            };
+
+            const data = simplifiedKinetics(params);
+
+            if (recoveryChart) recoveryChart.destroy();
+            recoveryChart = new Chart(recoveryCtx, {
+                type: 'line',
+                data: {
+                    labels: data.time,
+                    datasets: [{
+                        label: 'بازیابی مس',
+                        data: data.recovery,
+                        borderColor: 'rgb(54, 162, 235)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: { display: true, text: 'بازیابی (%)', font: { family: 'Vazirmatn' } },
+                            ticks: { font: { family: 'Vazirmatn' } }
+                        },
+                        x: {
+                            title: { display: true, text: 'زمان (روز)', font: { family: 'Vazirmatn' } },
+                            ticks: { font: { family: 'Vazirmatn' } }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { font: { family: 'Vazirmatn' } } },
+                        tooltip: { bodyFont: { family: 'Vazirmatn' }, titleFont: { family: 'Vazirmatn' } }
+                    }
+                }
+            });
+
+            if (plsChart) plsChart.destroy();
+            plsChart = new Chart(plsCtx, {
+                type: 'line',
+                data: {
+                    labels: data.time,
+                    datasets: [{
+                        label: 'غلظت مس در PLS',
+                        data: data.plsConcentration,
+                        borderColor: 'rgb(255, 99, 132)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'غلظت (g/L)', font: { family: 'Vazirmatn' } },
+                            ticks: { font: { family: 'Vazirmatn' } }
+                        },
+                        x: {
+                            title: { display: true, text: 'زمان (روز)', font: { family: 'Vazirmatn' } },
+                            ticks: { font: { family: 'Vazirmatn' } }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { font: { family: 'Vazirmatn' } } },
+                        tooltip: { bodyFont: { family: 'Vazirmatn' }, titleFont: { family: 'Vazirmatn' } }
+                    }
+                }
+            });
+        }
+
+        oreGradeSlider.addEventListener('input', (e) => {
+            oreGradeValue.textContent = e.target.value;
+            createOrUpdateCharts();
+        });
+        irrigationRateSlider.addEventListener('input', (e) => {
+            irrigationRateValue.textContent = e.target.value;
+            createOrUpdateCharts();
+        });
+        fastLeachFractionSlider.addEventListener('input', (e) => {
+            fastLeachFractionValue.textContent = e.target.value;
+            createOrUpdateCharts();
+        });
+
+        createOrUpdateCharts();
+
+        // --- Scenario Analysis ---
+        const analysisCtx = document.getElementById('analysisChart').getContext('2d');
+        const scenarioBtns = document.querySelectorAll('.scenario-btn');
+        const analysisText = document.getElementById('analysis-text');
+        let analysisChart;
+
+        const analysisData = {
+            labels: ['زمان چرخه (روز)', 'اوج غلظت PLS (g/L)'],
+            scenarios: [
+                { name: 'پایین (8)', data: [310, 5.2], color: 'rgba(255, 159, 64, 0.7)', text: 'نرخ آبیاری پایین، زمان چرخه را طولانی‌تر می‌کند اما به دلیل زمان تماس بیشتر، غلظت مس در محلول خروجی (PLS) بالاتر می‌رود.' },
+                { name: 'پایه (10)', data: [250, 4.5], color: 'rgba(54, 162, 235, 0.7)', text: 'نرخ آبیاری پایه، یک تعادل منطقی بین سرعت بازیابی و غلظت PLS ایجاد می‌کند که اغلب برای عملیات SX/EW مناسب است.' },
+                { name: 'بالا (12)', data: [210, 3.9], color: 'rgba(75, 192, 192, 0.7)', text: 'نرخ آبیاری بالا، بازیابی را تسریع می‌کند و زمان چرخه را کاهش می‌دهد، اما با رقیق کردن محلول، غلظت PLS را کاهش داده که ممکن است بر کارایی مدار SX تأثیر منفی بگذارد.' }
+            ]
+        };
+
+        function createOrUpdateAnalysisChart(activeIndex = 1) {
+            const datasets = analysisData.scenarios.map((scenario, index) => ({
+                label: scenario.name,
+                data: scenario.data,
+                backgroundColor: scenario.color,
+                borderColor: scenario.color.replace('0.7', '1'),
+                borderWidth: 2,
+            }));
+
+            if(analysisChart) analysisChart.destroy();
+            analysisChart = new Chart(analysisCtx, {
+                type: 'bar',
+                data: {
+                    labels: analysisData.labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'x',
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { font: { family: 'Vazirmatn' } }
+                        },
+                        x: {
+                            ticks: { font: { family: 'Vazirmatn', size: 14 } }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: { font: { family: 'Vazirmatn' } }
+                        },
+                        tooltip: {
+                            bodyFont: { family: 'Vazirmatn' },
+                            titleFont: { family: 'Vazirmatn' }
+                        }
+                    }
+                }
+            });
+            updateAnalysisText(activeIndex);
+        }
+
+        function updateAnalysisText(index) {
+            analysisText.textContent = analysisData.scenarios[index].text;
+        }
+
+        scenarioBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                scenarioBtns.forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                const scenarioIndex = parseInt(e.target.dataset.scenario);
+                updateAnalysisText(scenarioIndex);
+                 // Highlight selected bar
+                analysisChart.data.datasets.forEach((dataset, i) => {
+                    dataset.backgroundColor = analysisData.scenarios[i].color.replace('0.7', i === scenarioIndex ? '0.7' : '0.2');
+                    dataset.borderColor = analysisData.scenarios[i].color.replace('0.7', i === scenarioIndex ? '1' : '0.3');
+                });
+                analysisChart.update();
+            });
+        });
+
+        createOrUpdateAnalysisChart();
+
+    });
+    </script>
 </body>
 </html>
