@@ -3,39 +3,92 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تحلیل دانه‌بندی</title>
+    <title>آنالیز دانه‌بندی مصالح</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>ابزار تحلیل دانه‌بندی آنلاین</h1>
-    <p>یک تصویر از سنگ‌ها آپلود کنید تا توزیع اندازه آن‌ها تحلیل شود.</p>
+    <header>
+        <h1>آنالیز دانه‌بندی مصالح</h1>
+        <div class="header-buttons">
+            <button id="export-pdf">خروجی PDF</button>
+            <button id="export-excel">خروجی Excel</button>
+        </div>
+    </header>
 
-    <div class="container">
-        <div class="upload-section">
-            <label for="imageUpload">آپلود تصویر:</label>
-            <input type="file" id="imageUpload" accept="image/*">
-            <button id="analyzeButton">شروع تحلیل</button>
+    <main class="container">
+        <div class="tabs">
+            <button class="tab-link active" onclick="openTab(event, 'image-analysis')">۱. تحلیل تصویری</button>
+            <button class="tab-link" onclick="openTab(event, 'sieve-analysis')">۲. ورود اطلاعات سرندها</button>
         </div>
 
-        <div class="result-section">
-            <div class="image-display">
-                <h2>تصویر ورودی</h2>
+        <!-- Tab: Image-based Analysis -->
+        <div id="image-analysis" class="tab-content active">
+            <h2>راهنمای تصویربرداری</h2>
+            <p>
+                - عکس را از فاصله حدود ۱ متری و عمود بر سطح بگیرید.
+                - یک جسم مرجع با اندازه مشخص (مانند سکه) کنار مصالح قرار دهید.
+                - برای دقت بیشتر، در حالت "دستی" یک خط بر روی قطر جسم مرجع رسم کنید.
+            </p>
+            <div class="upload-section">
+                <label for="imageUpload">۱. آپلود تصویر مصالح:</label>
+                <input type="file" id="imageUpload" accept="image/*">
+            </div>
+            <div class="reference-section">
+                <label for="ref-diameter">۲. قطر واقعی جسم مرجع (میلی‌متر):</label>
+                <input type="number" id="ref-diameter" value="24.26">
+                <p>روی تصویر کلیک کرده و بکشید تا خطی بر روی قطر جسم مرجع رسم شود.</p>
+            </div>
+            <div class="canvas-container">
                 <canvas id="imageCanvas"></canvas>
             </div>
-            <div class="chart-display">
-                <h2>نمودار توزیع اندازه</h2>
-                <canvas id="resultChart"></canvas>
+            <button id="process-image-btn">۳. پردازش تصویر و محاسبه دانه‌بندی</button>
+        </div>
+
+        <!-- Tab: Sieve Data Entry -->
+        <div id="sieve-analysis" class="tab-content">
+            <h2>ورود دستی داده‌های سرند</h2>
+            <table id="sieve-table">
+                <thead>
+                    <tr>
+                        <th>نام سرند</th>
+                        <th>اندازه سرند (میکرومتر)</th>
+                        <th>وزن باقی‌مانده (گرم)</th>
+                        <th>عملیات</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Rows will be added dynamically -->
+                </tbody>
+            </table>
+            <button id="add-sieve-row">افزودن سرند</button>
+            <button id="calculate-sieve-btn">محاسبه</button>
+        </div>
+
+        <!-- Results Section -->
+        <div class="results-container">
+            <h2>۳. نتایج آنالیز</h2>
+            <div class="results-grid">
+                <p><strong>D10:</strong> <span id="d10-val">-</span></p>
+                <p><strong>D30:</strong> <span id="d30-val">-</span></p>
+                <p><strong>D50 (Median):</strong> <span id="d50-val">-</span></p>
+                <p><strong>D60:</strong> <span id="d60-val">-</span></p>
+                <p><strong>ضریب یکنواختی (Cu):</strong> <span id="cu-val">-</span></p>
+                <p><strong>ضریب انحنا (Cc):</strong> <span id="cc-val">-</span></p>
             </div>
         </div>
-        <div id="loading">
+
+        <!-- Chart Section -->
+        <div class="chart-container">
+            <h2>۴. نمودار دانه‌بندی</h2>
+            <canvas id="resultChart"></canvas>
+        </div>
+
+        <!-- Loading Spinner -->
+        <div id="loading" class="hidden">
             <div class="spinner"></div>
-            <p>در حال پردازش... لطفاً صبر کنید.</p>
+            <p>در حال پردازش...</p>
         </div>
-        <div id="errorContainer" class="hidden">
-            <h3>خطا</h3>
-            <p id="errorMessage"></p>
-        </div>
-    </div>
+    </main>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script async src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady();"></script>
