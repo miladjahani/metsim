@@ -6,6 +6,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { connect } from "cloudflare:sockets";
+import { getCatalogCountryProxies } from "./catalog.js";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -179,6 +180,19 @@ export async function getLocations(env) {
 
 export async function saveLocations(env, locs) {
   await env.SPIDER_KV.put("proxies", JSON.stringify(locs));
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+// catalogRouting: catalog countries act as locations automatically (default on).
+export async function getSettings(env) {
+  try {
+    const s = JSON.parse((await env.SPIDER_KV.get("spider:settings")) || "null");
+    return { catalogRouting: !s || s.catalogRouting !== false };
+  } catch { return { catalogRouting: true }; }
+}
+
+export async function saveSettings(env, s) {
+  await env.SPIDER_KV.put("spider:settings", JSON.stringify(s));
 }
 
 function countryProxyList(loc) {
@@ -388,37 +402,58 @@ async function rankCountryProxies(loc) {
     for (const p of list) if (!alive.includes(p)) alive.push(p);
     return alive;
   }
-  const results = await Promise.all(list.map(async (e) => ({ e, ms: await probeProxyLatency(e, loc) })));
+  // Probe at most PROBE_MAX entries per country per cache window — racing
+  // hundreds of sockets would blow the request budget on big lists.
+  const head = list.slice(0, PROBE_MAX);
+  const tail = list.slice(PROBE_MAX);
+  const results = await Promise.all(head.map(async (e) => ({ e, ms: await probeProxyLatency(e, loc) })));
   results.sort((a, b) => (a.ms < 0 ? 1 : b.ms < 0 ? -1 : a.ms - b.ms));
-  const order = results.map((r) => r.e);
+  const order = results.map((r) => r.e).concat(tail);
   FASTEST_CACHE[key] = { order, at: Date.now() };
   return order;
 }
 
 // Resolve the outbound connection for a tunnel session.
-// Order: country pool → user.proxy_ip. NO cross-country fallback: when the
-// client explicitly asked /route/tr it must never silently exit from another
-// country. Within a country the fastest proxy wins (TCP-latency race).
+// Country routes: manual location pool first (fastest-probe order), then the
+// LIVE catalog for that country (EDT-Pages/Proxy-List) — so every catalog
+// country is routable without manual setup. Direct routes: user.proxy_ip, or
+// direct egress with anti-loop (never back into this Worker).
+const PROBE_MAX = 8;
+const TRY_MAX = 5;
+
 export async function connectOutbound(env, country, user, targetHost, targetPort, workerHost) {
   let candidates = [];
   let loc = null;
   if (country) {
     loc = (await getLocations(env)).find((x) => String(x.code || "").toLowerCase() === String(country).toLowerCase()) || null;
     candidates = await rankCountryProxies(loc);
+    const settings = await getSettings(env);
+    if (settings.catalogRouting) {
+      const catProxies = await getCatalogCountryProxies(env, country);
+      for (const p of catProxies) {
+        if (!candidates.includes(p.entry)) candidates.push(p.entry);
+      }
+    }
     if (!candidates.length) return null;
   } else {
     candidates = [String(user.proxy_ip || "").trim()].filter(Boolean);
   }
+  let tried = 0;
   for (const entry of candidates) {
+    if (tried >= TRY_MAX) break;
+    tried++;
     const conn = await connectViaProxy(entry, targetHost, targetPort, loc);
     if (conn) return conn;
   }
-  // Cached ranking may be stale — re-race once so a dead entry never blocks.
+  // Cached ranking may be stale — re-race the manual pool once so a dead entry
+  // never blocks (catalog rows below are already tried in the loop above).
   if (country && loc) {
     delete FASTEST_CACHE[String(loc.code || loc.country || "x").toLowerCase()];
     const fresh = await rankCountryProxies(loc);
-    const rest = fresh.filter((e) => !candidates.includes(e));
+    const rest = fresh.filter((e) => !candidates.slice(0, tried).includes(e));
     for (const entry of rest) {
+      if (tried >= TRY_MAX * 2) break;
+      tried++;
       const conn = await connectViaProxy(entry, targetHost, targetPort, loc);
       if (conn) return conn;
     }

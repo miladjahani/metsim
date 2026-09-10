@@ -2,6 +2,7 @@
 // Plain browser JS (no build step); loaded via Wrangler Text import.
 var PANEL = '/spider';
 var users = [], locs = [], subs = [], active = 'users';
+var settings = { catalogRouting: true };
 var editingUuid = '', editingLoc = '', currentLinks = [];
 var cat = null, catLoading = false, catOpenCountry = '', catProto = 'all';
 
@@ -128,7 +129,7 @@ function locsTab() {
       rowBtn('loc-del', l.code, 'حذف', true) +
       '</div></td></tr>';
   }).join('');
-  if (!rows) rows = '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">لوکیشنی ثبت نشده — اتصال‌ها مستقیم از ورکر خارج می‌شوند</td></tr>';
+  if (!rows) rows = '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">لوکیشن دستی ثبت نشده — کشورهای کاتالوگ زنده بدون ثبت هم کار می‌کنند (تب کاتالوگ)</td></tr>';
   return '<div class="top"><h2>لوکیشن‌ها (کشورها)</h2><button class="small" data-act="loc-new">+ لوکیشن</button></div>' +
     '<div class="card tbwrap"><table><thead><tr><th>کد</th><th>نام</th><th>پروکسی‌ها</th><th>عملیات</th></tr></thead><tbody>' +
     rows + '</tbody></table></div>' +
@@ -166,8 +167,9 @@ function catalogTab() {
   var upd = new Date(cat.updated * 1000).toLocaleTimeString('fa-IR');
   return '<div class="top"><h2>کاتالوگ پروکسی زنده</h2>' +
     '<button class="small ghost" data-act="cat-refresh">به‌روزرسانی' + (catLoading ? '…' : '') + '</button></div>' +
+    '<div class="msg ok" style="margin:0 0 12px">این کشورها همون لوکیشن‌ها هستند — هر کاربری که کشورش را بگیرید، از پروکسی‌های زنده همین کاتالوگ عبور می‌کند. ثبت دستی لازم نیست.</div>' +
     '<p class="muted" style="margin-bottom:12px">منبع: <code>EDT-Pages/Proxy-List</code> — آخرین به‌روزرسانی: ' + upd +
-    ' — کل: <b>' + cat.totals.all + '</b> پروکسی</p>' +
+    ' — کل: <b>' + cat.totals.all + '</b> پروکسی در <b>' + cat.countries.length + '</b> کشور</p>' +
     '<div class="cgrid">' + cards + '</div>';
 }
 
@@ -247,13 +249,26 @@ function subsTab() {
     rows + '</tbody></table></div>';
 }
 
-function setTab() {
+function settingsTab() {
   return '<div class="card"><h2>تنظیمات و اطلاعات</h2>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap">' +
+    '<div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b>' +
+    '<div class="muted" style="margin-top:3px">هر کشوری در کاتالوگ زنده، خودش یک لوکیشن قابل استفاده در <code>/route/{code}</code> است — بدون نیاز به ثبت دستی.</div></div>' +
+    '<button class="small ' + (settings.catalogRouting ? '' : 'ghost') + '" data-act="toggle-catalog">' + (settings.catalogRouting ? 'فعال ✓' : 'غیرفعال') + '</button></div>' +
+    '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">' +
     '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code></p>' +
-    '<p class="muted" style="margin:8px 0">مسیر پنل: <code>' + PANEL + '</code></p>' +
-    '<p class="muted" style="margin:8px 0">کاربران: <b>' + users.length + '</b> — لوکیشن‌ها: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
-    '<p class="muted" style="margin:8px 0">مسیر تونل VLESS: <code>/{uuid}</code> برای اتصال مستقیم و <code>/route/{code}</code> برای مسیر کشور. پنل و تونل هر دو روی همین ورکر اجرا می‌شوند.</p>' +
+    '<p class="muted" style="margin:8px 0">مسیر پنل: <code>' + PANEL + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌های دستی: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
+    '<p class="muted" style="margin:8px 0">تونل مستقیم: <code>/{uuid}</code> — تونل کشوری: <code>/route/{code}</code> (اول پروکسی‌های دستی، بعد کاتالوگ زنده، آخر خروج مستقیم)</p>' +
     '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code></p></div>';
+}
+
+async function toggleCatalogRouting() {
+  try {
+    var r = await api('/settings', 'POST', JSON.stringify({ catalogRouting: !settings.catalogRouting }));
+    settings = r.settings || settings;
+    toast(settings.catalogRouting ? 'مسیریابی کاتالوگ فعال شد' : 'مسیریابی کاتالوگ خاموش شد');
+    render();
+  } catch (e) { toast('خطا: ' + e.message, false); }
 }
 
 function render() {
@@ -263,7 +278,7 @@ function render() {
   else if (active === 'locs') body = locsTab();
   else if (active === 'subs') body = subsTab();
   else if (active === 'catalog') body = catalogTab();
-  else body = setTab();
+  else body = settingsTab();
   v.innerHTML = (active !== 'settings' ? statCards() : '') + body;
   var tabs = document.querySelectorAll('.tabs button');
   for (var i = 0; i < tabs.length; i++) {
@@ -276,6 +291,7 @@ async function refresh() {
   users = d.users || [];
   locs = d.locations || [];
   subs = d.subs || [];
+  settings = d.settings || settings;
   render();
 }
 
@@ -309,6 +325,7 @@ document.addEventListener('click', function (e) {
   if (act === 'cat-refresh') return loadCatalog(true);
   if (act === 'cat-proto') { catProto = arg; openCountry(catOpenCountry); return; }
   if (act === 'cat-add') return addCatalogProxies(arg);
+  if (act === 'toggle-catalog') return toggleCatalogRouting();
 });
 
 window.showUserDlg = function (uuid) {

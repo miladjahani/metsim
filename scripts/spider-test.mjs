@@ -123,6 +123,29 @@ console.log("── admin api: proxy catalog ──");
   await req("/spider/locations/cattest", { method: "DELETE" });
 }
 
+console.log("── admin api: settings + catalog routing ──");
+{
+  const s0 = await req("/spider/state");
+  const st0 = await s0.json();
+  check("state includes settings (default on)", s0.status === 200 && st0.settings && st0.settings.catalogRouting === true);
+
+  const off = await req("/spider/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ catalogRouting: false }),
+  });
+  check("settings toggle off", off.status === 200 && (await off.json()).settings.catalogRouting === false);
+  const s1 = await req("/spider/state");
+  check("state reflects off", (await s1.json()).settings.catalogRouting === false);
+
+  const on = await req("/spider/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ catalogRouting: true }),
+  });
+  check("settings toggle on", on.status === 200 && (await on.json()).settings.catalogRouting === true);
+}
+
 console.log("── admin api: subscriptions ──");
 let subToken = "";
 {

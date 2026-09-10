@@ -15,7 +15,7 @@
 import {
   UUID_RE, nowSec, randomToken, randomUuid, sha256Hex, timingSafeEq,
   getSetup, saveSetup, getUser, getUserRaw, saveUser, listUsers,
-  getLocations, saveLocations, vlessConfigsForUser,
+  getLocations, saveLocations, vlessConfigsForUser, getSettings, saveSettings,
 } from "./tunnel.js";
 import dashboardJs from "./dashboard.txt";
 import { handleCatalog } from "./catalog.js";
@@ -145,7 +145,18 @@ export async function handlePanel(request, env, url) {
     for (const k of list.keys) {
       try { const s = JSON.parse(await env.SPIDER_KV.get(k.name)); if (s) subs.push(s); } catch { /* skip */ }
     }
-    return json({ ok: true, users: await listUsers(env), locations: await getLocations(env), subs });
+    return json({ ok: true, users: await listUsers(env), locations: await getLocations(env), subs, settings: await getSettings(env) });
+  }
+
+  if (sub === "/settings" && method === "POST") {
+    let b;
+    try { b = await request.json(); } catch { return json({ error: "bad json" }, 400); }
+    const cur = await getSettings(env);
+    const next = {
+      catalogRouting: typeof b.catalogRouting === "boolean" ? b.catalogRouting : cur.catalogRouting,
+    };
+    await saveSettings(env, next);
+    return json({ ok: true, settings: next });
   }
 
   if (sub === "/users" && method === "POST") {
