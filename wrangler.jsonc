@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "spiderpanel",
+  "name": "metsim",
   "main": "src/worker.js",
   "compatibility_date": "2025-05-01",
   "compatibility_flags": ["nodejs_compat"],

@@ -41,9 +41,9 @@
 ### ۳. تنظیمات دیپلوی
 Cloudflare به‌صورت خودکار `wrangler.jsonc` را می‌خواند:
 - **Entry point**: `src/worker.js`
-- **KV binding**: `SPIDER_KV` — حتماً یک namespace بسازید و به این نام bind کنید (در مرحله Import، Cloudflare گزینه ساخت خودکار KV را نشان می‌دهد؛ همان را تأیید کنید).
+- **KV binding**: `SPIDER_KV` — نیازی به ساخت دستی نیست؛ اسکریپت build هنگام دیپلوی، namespace را پیدا یا می‌سازد و شناسه‌اش را در کانفیگ قرار می‌دهد (`scripts/provision-kv.mjs`).
 
-> 💡 اگر شناسه KV را در `wrangler.jsonc` جای `SPIDER_KV_PLACEHOLDER` نگذاشته‌اید، Cloudflare هنگام Import به‌صورت خودکار namespace می‌سازد و جایگزین می‌کند.
+> ⚠️ اگر توکن Workers Builds دسترسی Workers KV Storage نداشته باشد، اسکریپت خطا می‌دهد و می‌گویید namespace با نام `metsim-SPIDER_KV` بسازید؛ در آن صورت شناسه‌اش را در `wrangler.jsonc` جای `SPIDER_KV_PLACEHOLDER` بگذارید.
 
 ### ۴. Deploy
 روی **Deploy** بزنید. از این به بعد هر `git push` به شاخه `main`، ورکر را به‌صورت خودکار به‌روزرسانی می‌کند.
@@ -67,6 +67,8 @@ https://<your-worker>.<your-subdomain>.workers.dev/spider
 npm install
 npx wrangler kv namespace create SPIDER_KV
 # شناسه‌ی تولیدشده را در wrangler.jsonc جای SPIDER_KV_PLACEHOLDER بگذارید
+# (یا CLOUDFLARE_ACCOUNT_ID و CLOUDFLARE_API_TOKEN را در env بگذارید و
+#  اسکریپت build به‌صورت خودکار این کار را انجام می‌دهد)
 npx wrangler deploy
 ```
 
