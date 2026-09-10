@@ -351,11 +351,6 @@ async function connectViaProxy(proxyEntry, targetHost, targetPort, loc) {
     if (!conn) return null;
     return httpConnectOn(conn, proxy, targetHost, targetPort);
   }
-  if (proxy.protocol === "https") {
-    const conn = await openTlsSocket(proxy.hostname, proxy.port);
-    if (!conn) return null;
-    return httpConnectOn(conn, proxy, targetHost, targetPort);
-  }
   if (proxy.protocol === "socks5" || proxy.protocol === "socks4") return socks5Connect(proxy, targetHost, targetPort);
   if (proxy.protocol === "relay") {
     // Successful TCP open is enough; relays never send a greeting, and reading
