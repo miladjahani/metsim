@@ -237,9 +237,22 @@ async function openSocket(hostname, port) {
   } catch { return null; }
 }
 
-async function httpConnect(proxy, targetHost, targetPort) {
-  const conn = await openSocket(proxy.hostname, proxy.port);
-  if (!conn) return null;
+// TLS to the proxy itself (https:// entries): TCP connect, then startTls on the
+// same socket. Same conn shape as openSocket; the HTTP CONNECT then runs
+// encrypted (RFC 2817 "https" proxy).
+async function openTlsSocket(hostname, port, servername) {
+  const base = await openSocket(hostname, port);
+  if (!base) return null;
+  try {
+    const tls = base.socket.startTls({ servername: servername || hostname });
+    return { socket: base.socket, reader: tls.readable.getReader(), writer: tls.writable.getWriter() };
+  } catch {
+    try { base.socket.close(); } catch { /* ignore */ }
+    return null;
+  }
+}
+
+async function httpConnectOn(conn, proxy, targetHost, targetPort) {
   try {
     let authority = targetHost.includes(":") ? "[" + targetHost + "]" : targetHost;
     authority += ":" + targetPort;
@@ -275,6 +288,12 @@ async function httpConnect(proxy, targetHost, targetPort) {
     try { conn.socket.close(); } catch { /* ignore */ }
     return null;
   }
+}
+
+async function httpConnect(proxy, targetHost, targetPort) {
+  const conn = await openSocket(proxy.hostname, proxy.port);
+  if (!conn) return null;
+  return httpConnectOn(conn, proxy, targetHost, targetPort);
 }
 
 async function socks5Connect(proxy, targetHost, targetPort) {
@@ -313,6 +332,16 @@ async function socks5Connect(proxy, targetHost, targetPort) {
 async function connectViaProxy(proxyEntry, targetHost, targetPort, loc) {
   const proxy = parseProxyEntry(proxyEntry, loc && Number(loc.port) ? Number(loc.port) : undefined);
   if (!proxy) return null;
+  if (proxy.protocol === "https") {
+    const conn = await openTlsSocket(proxy.hostname, proxy.port);
+    if (!conn) return null;
+    return httpConnectOn(conn, proxy, targetHost, targetPort);
+  }
+  if (proxy.protocol === "https") {
+    const conn = await openTlsSocket(proxy.hostname, proxy.port);
+    if (!conn) return null;
+    return httpConnectOn(conn, proxy, targetHost, targetPort);
+  }
   if (proxy.protocol === "socks5" || proxy.protocol === "socks4") return socks5Connect(proxy, targetHost, targetPort);
   if (proxy.protocol === "relay") {
     // Successful TCP open is enough; relays never send a greeting, and reading

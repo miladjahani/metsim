@@ -3,6 +3,7 @@
 var PANEL = '/spider';
 var users = [], locs = [], subs = [], active = 'users';
 var editingUuid = '', editingLoc = '', currentLinks = [];
+var cat = null, catLoading = false, catOpenCountry = '', catProto = 'all';
 
 function $(id) { return document.getElementById(id); }
 
@@ -40,6 +41,15 @@ function fmtDate(ts) {
   try { return new Date(ts * 1000).toLocaleDateString('fa-IR'); } catch (e) { return String(ts); }
 }
 
+function toast(msg, ok) {
+  var t = document.createElement('div');
+  t.className = 'toast' + (ok === false ? ' bad' : '');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(function () { t.classList.add('in'); }, 10);
+  setTimeout(function () { t.classList.remove('in'); setTimeout(function () { t.remove(); }, 300); }, 2200);
+}
+
 function statePill(u) {
   if (u.disabled) return '<span class="pill off">غیرفعال</span>';
   if (u.expire && Math.floor(Date.now() / 1000) > u.expire) return '<span class="pill warn">منقضی</span>';
@@ -71,7 +81,7 @@ function fallbackCopy(t) {
   ta.select();
   document.execCommand('copy');
   ta.remove();
-  alert('کپی شد ✓');
+  toast('کپی شد ✓');
 }
 
 function openDlg(h) { var d = $('dlg'); d.innerHTML = h; d.showModal(); }
@@ -125,6 +135,101 @@ function locsTab() {
     '<p class="muted" style="margin-top:10px">فرمت پروکسی: <code>ip:port</code> رله خام، یا <code>socks5://user:pass@ip:port</code> / <code>http://ip:port</code></p>';
 }
 
+function statCards() {
+  var activeUsers = users.filter(function (u) {
+    return !u.disabled && (!u.expire || Math.floor(Date.now() / 1000) <= u.expire);
+  }).length;
+  return '<div class="stats">' +
+    '<div class="stat"><b>' + users.length + '</b><span>کاربران</span></div>' +
+    '<div class="stat"><b>' + activeUsers + '</b><span>فعال</span></div>' +
+    '<div class="stat"><b>' + locs.length + '</b><span>لوکیشن</span></div>' +
+    '<div class="stat"><b>' + subs.length + '</b><span>اشتراک</span></div>' +
+    '</div>';
+}
+
+// ── Live proxy catalog (EDT-Pages/Proxy-List) ────────────────────────────────
+function catalogTab() {
+  if (!cat && !catLoading) { loadCatalog(false); return '<div class="muted">در حال دریافت کاتالوگ پروکسی…</div>'; }
+  if (!cat) return '<div class="muted">در حال دریافت کاتالوگ پروکسی…</div>';
+  if (catOpenCountry) return countryDetail();
+  var cards = cat.countries.map(function (c) {
+    var flags = [c.http && 'HTTP', c.https && 'TLS', c.socks5 && 'SOCKS5'].filter(Boolean).map(function (p) {
+      return '<span class="pill info">' + p + '</span>';
+    }).join('');
+    return '<div class="ccard" data-act="cat-open" data-arg="' + escHtml(c.code) + '">' +
+      '<div class="fl">' + escHtml(c.emoji || '🌐') + '</div>' +
+      '<div class="nm">' + escHtml(c.name || c.code) + '</div>' +
+      '<div class="ct">' + c.total + ' پروکسی</div>' +
+      '<div class="proto">' + flags + '</div></div>';
+  }).join('');
+  if (!cards) cards = '<div class="muted">کاتالوگ خالی است</div>';
+  var upd = new Date(cat.updated * 1000).toLocaleTimeString('fa-IR');
+  return '<div class="top"><h2>کاتالوگ پروکسی زنده</h2>' +
+    '<button class="small ghost" data-act="cat-refresh">به‌روزرسانی' + (catLoading ? '…' : '') + '</button></div>' +
+    '<p class="muted" style="margin-bottom:12px">منبع: <code>EDT-Pages/Proxy-List</code> — آخرین به‌روزرسانی: ' + upd +
+    ' — کل: <b>' + cat.totals.all + '</b> پروکسی</p>' +
+    '<div class="cgrid">' + cards + '</div>';
+}
+
+function countryDetail() {
+  var c = cat.countries.find(function (x) { return x.code === catOpenCountry; });
+  var rows = (cat.byCountry[catOpenCountry] || []);
+  if (catProto !== 'all') rows = rows.filter(function (p) { return p.proto === catProto; });
+  var list = rows.slice(0, 60).map(function (p) {
+    return '<tr><td class="ltr">' + escHtml(p.ip) + ':' + p.port + '</td><td><span class="pill info">' + p.proto.toUpperCase() + '</span></td>' +
+      '<td class="muted">' + escHtml(p.city || '') + '</td></tr>';
+  }).join('');
+  var protoBtns = ['all', 'http', 'https', 'socks5'].map(function (p) {
+    var lbl = p === 'all' ? 'همه' : p.toUpperCase();
+    return '<button class="small ' + (catProto === p ? '' : 'ghost') + '" data-act="cat-proto" data-arg="' + p + '">' + lbl + '</button>';
+  }).join('');
+  return '<div class="top"><div><button class="small ghost" data-act="cat-back">→ بازگشت</button></div>' +
+    '<h2>' + escHtml((c && (c.emoji + ' ' + (c.name || c.code))) || catOpenCountry) + '</h2><span></span></div>' +
+    '<div class="actions" style="margin-bottom:12px">' + protoBtns +
+    '<span style="flex:1"></span>' +
+    '<button class="small" data-act="cat-add" data-arg="' + escHtml(catOpenCountry) + '">افزودن ' + rows.length + ' پروکسی به لوکیشن</button></div>' +
+    (list ? '<div class="card tbwrap"><table><thead><tr><th>پروکسی</th><th>نوع</th><th>شهر</th></tr></thead><tbody>' + list + '</tbody></table></div>'
+      : '<div class="muted">موردی نیست</div>');
+}
+
+async function loadCatalog(force) {
+  catLoading = true;
+  render();
+  try {
+    cat = await api('/catalog' + (force ? '?refresh=1' : ''));
+  } catch (e) { toast('خطا در دریافت کاتالوگ: ' + e.message, false); }
+  catLoading = false;
+  render();
+}
+
+async function openCountry(code) {
+  if (!cat) return;
+  catOpenCountry = code;
+  if (!cat.byCountry[code]) {
+    try {
+      var r = await api('/catalog?country=' + encodeURIComponent(code));
+      cat.byCountry[code] = r.proxies || [];
+    } catch (e) { toast('خطا: ' + e.message, false); }
+  }
+  render();
+}
+
+async function addCatalogProxies(code) {
+  var rows = (cat.byCountry[code] || []);
+  if (!rows.length) return;
+  var proxies = rows.map(function (p) { return p.proxy; });
+  var existing = locs.find(function (l) { return l.code === code.toLowerCase(); });
+  var name = (cat.countries.find(function (c) { return c.code === code; }) || {}).name || code;
+  var merged = existing
+    ? [existing.proxy].concat(existing.proxies || []).concat(proxies).filter(Boolean).filter(function (v, i, a) { return a.indexOf(v) === i; })
+    : proxies;
+  try {
+    await api('/locations', 'POST', JSON.stringify({ code: code, name: name, proxies: merged }));
+    toast(merged.length + ' پروکسی در لوکیشن ' + code.toUpperCase() + ' ذخیره شد ✓');
+    await refresh();
+  } catch (e) { toast('خطا: ' + e.message, false); }
+}
+
 function subsTab() {
   var rows = subs.map(function (s) {
     return '<tr><td><b>' + escHtml(s.name) + '</b></td>' +
@@ -153,10 +258,13 @@ function setTab() {
 
 function render() {
   var v = $('view');
-  if (active === 'users') v.innerHTML = usersTab();
-  else if (active === 'locs') v.innerHTML = locsTab();
-  else if (active === 'subs') v.innerHTML = subsTab();
-  else v.innerHTML = setTab();
+  var body;
+  if (active === 'users') body = usersTab();
+  else if (active === 'locs') body = locsTab();
+  else if (active === 'subs') body = subsTab();
+  else if (active === 'catalog') body = catalogTab();
+  else body = setTab();
+  v.innerHTML = (active !== 'settings' ? statCards() : '') + body;
   var tabs = document.querySelectorAll('.tabs button');
   for (var i = 0; i < tabs.length; i++) {
     tabs[i].classList.toggle('ghost', tabs[i].getAttribute('data-arg') !== active);
@@ -170,6 +278,7 @@ async function refresh() {
   subs = d.subs || [];
   render();
 }
+
 
 // One delegated click handler resolves every data-act button (tabs, rows, dialogs).
 document.addEventListener('click', function (e) {
@@ -195,6 +304,11 @@ document.addEventListener('click', function (e) {
   if (act === 'save-sub') return saveSub();
   if (act === 'copy-all') return copyText(currentLinks.join('\n'));
   if (act === 'dlg-close') return closeDlg();
+  if (act === 'cat-open') return openCountry(arg);
+  if (act === 'cat-back') { catOpenCountry = ''; render(); return; }
+  if (act === 'cat-refresh') return loadCatalog(true);
+  if (act === 'cat-proto') { catProto = arg; openCountry(catOpenCountry); return; }
+  if (act === 'cat-add') return addCatalogProxies(arg);
 });
 
 window.showUserDlg = function (uuid) {

@@ -102,6 +102,27 @@ console.log("── admin api: locations ──");
   check("create location ok", loc.status === 200 && lj.locations.length === 1 && lj.locations[0].proxy === "1.2.3.4:443");
 }
 
+console.log("── admin api: proxy catalog ──");
+{
+  const cat = await req("/spider/catalog");
+  const cj = await cat.json();
+  check("catalog aggregates countries", cat.status === 200 && cj.ok && cj.countries.length > 0 && cj.totals.all > 0);
+  const top = cj.countries[0].code;
+  const det = await req("/spider/catalog?country=" + encodeURIComponent(top));
+  const dj = await det.json();
+  check("catalog country rows", det.status === 200 && dj.ok && dj.proxies.length > 0 && dj.proxies[0].proxy.includes(":"));
+
+  // End-to-end: a catalog proxy stored as a location must appear in configs.
+  const p = dj.proxies[0];
+  const locAdd = await req("/spider/locations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: "cattest", name: "Catalog Test", proxies: [p.proxy] }),
+  });
+  check("catalog proxy usable as location", locAdd.status === 200);
+  await req("/spider/locations/cattest", { method: "DELETE" });
+}
+
 console.log("── admin api: subscriptions ──");
 let subToken = "";
 {
