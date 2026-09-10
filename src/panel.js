@@ -17,8 +17,8 @@ import {
   getSetup, saveSetup, getUser, getUserRaw, saveUser, listUsers,
   getLocations, saveLocations, vlessConfigsForUser, getSettings, saveSettings,
 } from "./tunnel.js";
-import dashboardJs from "./dashboard.txt";
 import { handleCatalog } from "./catalog.js";
+import dashboardJs from "./dashboard.txt";
 
 export const PANEL_PATH = "/spider";
 const SESSION_TTL = 86400;
@@ -74,12 +74,14 @@ export async function handleSubscription(request, env, url, token) {
   if (sub.expire && nowSec() > sub.expire) return new Response("Expired", { status: 410 });
   const host = (request.headers.get("host") || "").trim();
   if (!host) return new Response("Bad host", { status: 500 });
+  const settings = await getSettings(env);
+  const domain = host.split(":")[0];
   const lines = [];
   let used = 0, limit = 0;
   for (const uuid of sub.uuids || []) {
     const u = await getUser(env, uuid);
     if (!u) continue;
-    for (const c of vlessConfigsForUser(u, host)) lines.push(c);
+    for (const c of vlessConfigsForUser(u, domain, settings)) lines.push(c);
     used += u.used_bytes || 0;
     if (u.limit_bytes > 0) limit += u.limit_bytes;
   }
@@ -91,7 +93,7 @@ export async function handleSubscription(request, env, url, token) {
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "subscription-userinfo": "upload=0; download=" + used + "; total=" + limit + "; expire=" + (sub.expire || 0),
-      "profile-update-interval": "6",
+      "profile-update-interval": "2",
     },
   });
 }
@@ -154,9 +156,22 @@ export async function handlePanel(request, env, url) {
     const cur = await getSettings(env);
     const next = {
       catalogRouting: typeof b.catalogRouting === "boolean" ? b.catalogRouting : cur.catalogRouting,
+      cdnHosts: Array.isArray(b.cdnHosts) ? b.cdnHosts.map((x) => String(x).trim()).filter(Boolean) : cur.cdnHosts,
+      ports: Array.isArray(b.ports) ? b.ports.map(Number).filter((p) => p > 0 && p < 65536) : cur.ports,
+      fragment: typeof b.fragment === "boolean" ? b.fragment : cur.fragment,
     };
     await saveSettings(env, next);
-    return json({ ok: true, settings: next });
+    return json({ ok: true, settings: await getSettings(env) });
+  }
+
+  // Server-side link generation for one user (CDN hosts × ports × countries).
+  if (sub.startsWith("/links/") && method === "GET") {
+    const uuid = decodeURIComponent(sub.slice("/links/".length)).toLowerCase();
+    const u = await getUserRaw(env, uuid);
+    if (!u) return json({ error: "not found" }, 404);
+    const host = (request.headers.get("host") || "").split(":")[0];
+    const configs = vlessConfigsForUser(u, host, await getSettings(env));
+    return json({ ok: true, configs });
   }
 
   if (sub === "/users" && method === "POST") {

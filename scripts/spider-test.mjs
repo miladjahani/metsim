@@ -164,7 +164,8 @@ let subToken = "";
   // Miniflare's dispatchFetch exposes the worker on 127.0.0.1:<port>, so the
   // Host header carries the port; in production the Host is the bare domain.
   check("public /sub/{token} → base64 vless configs", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
-  check("config host uses request domain", /@[^:]+:\d+:443/.test(decoded));
+  check("first config targets worker domain :443", decoded.includes("@127.0.0.1:443?"));
+  check("CDN host + fragment included", decoded.includes("speed.cloudflare.com") && decoded.includes("fragment=tlshello"));
   check("country route paths present", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
 
   const nf = await req("/sub/doesnotexist");

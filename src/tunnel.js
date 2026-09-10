@@ -184,11 +184,35 @@ export async function saveLocations(env, locs) {
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 // catalogRouting: catalog countries act as locations automatically (default on).
+// cdnHosts: extra TLS fronting hosts (CDN / clean IPs) mixed into every user's
+//   subscription alongside the worker domain — server-side, so end users only
+//   refresh their sub link to pick up changes.
+// ports: TLS ports offered on workers.dev / CDN fronting (443, 2053, 2083…).
+// fragment: append Xray TLS-fragment option (tlshello splitting) to configs.
+const CDN_DEFAULTS = ["speed.cloudflare.com", "icook.hk", "time.is", "cf.090227.xyz", "ip.sb"];
+const PORT_DEFAULTS = [443, 2053, 2083];
+
+function normalizeSettings(s) {
+  s = s && typeof s === "object" ? s : {};
+  const cdn = Array.isArray(s.cdnHosts)
+    ? s.cdnHosts.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
+    : CDN_DEFAULTS;
+  const ports = Array.isArray(s.ports)
+    ? s.ports.map(Number).filter((p) => p > 0 && p < 65536).slice(0, 6)
+    : PORT_DEFAULTS.slice();
+  return {
+    catalogRouting: s.catalogRouting !== false,
+    cdnHosts: cdn.length ? cdn : CDN_DEFAULTS,
+    ports: ports.length ? ports : [443],
+    fragment: s.fragment !== false,
+  };
+}
+
 export async function getSettings(env) {
   try {
     const s = JSON.parse((await env.SPIDER_KV.get("spider:settings")) || "null");
-    return { catalogRouting: !s || s.catalogRouting !== false };
-  } catch { return { catalogRouting: true }; }
+    return normalizeSettings(s);
+  } catch { return normalizeSettings(null); }
 }
 
 export async function saveSettings(env, s) {
@@ -463,15 +487,33 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
 }
 
 // ── Config generation ────────────────────────────────────────────────────────
-export function vlessConfigsForUser(u, domain) {
+// Server-side generation: worker domain + CDN/clean-IP hosts × TLS ports ×
+// user countries (+ the direct path). End users just refresh their sub link —
+// proxy/CDN/port changes flow into the configs automatically.
+const CONFIG_CAP = 30;
+
+export function vlessConfigsForUser(u, domain, settings) {
+  const s = normalizeSettings(settings);
   const out = [];
+  const seen = new Set();
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
+  const hosts = [domain].concat(s.cdnHosts).slice(0, 4);
   for (const code of countries) {
     const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/" + u.uuid;
-    const remark = (u.remark || "user") + (code ? " " + String(code).toUpperCase() : "");
-    const q = "encryption=none&security=tls&sni=" + encodeURIComponent(domain) +
-      "&host=" + encodeURIComponent(domain) + "&fp=chrome&type=ws&path=" + encodeURIComponent(path);
-    out.push("vless://" + u.uuid + "@" + domain + ":443?" + q + "#" + encodeURIComponent(remark));
+    const baseName = (u.remark || "user") + (code ? " " + String(code).toUpperCase() : "");
+    for (const host of hosts) {
+      for (const port of s.ports) {
+        if (out.length >= CONFIG_CAP) return out;
+        const key = host + ":" + port + ":" + path;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const q = "encryption=none&security=tls&sni=" + encodeURIComponent(host) +
+          "&host=" + encodeURIComponent(host) + "&fp=chrome&type=ws&path=" + encodeURIComponent(path) +
+          (s.fragment ? "&fragment=tlshello,100-200,10-20" : "");
+        const label = baseName + (host === domain ? "" : " ⭐cdn") + ":" + port;
+        out.push("vless://" + u.uuid + "@" + host + ":" + port + "?" + q + "#" + encodeURIComponent(label));
+      }
+    }
   }
   return out;
 }

@@ -58,16 +58,8 @@ function statePill(u) {
   return '<span class="pill ok">فعال</span>';
 }
 
-function linksFor(u) {
-  var host = location.host;
-  var codes = (u.countries && u.countries.length) ? u.countries : [''];
-  return codes.map(function (c) {
-    var p = c ? '/route/' + c : '/' + u.uuid;
-    var name = u.remark + (c ? ' ' + c.toUpperCase() : '');
-    return 'vless://' + u.uuid + '@' + host + ':443?encryption=none&security=tls&sni=' + host +
-      '&host=' + host + '&fp=chrome&type=ws&path=' + encodeURIComponent(p) + '#' + encodeURIComponent(name);
-  });
-}
+// Links come from the server (/links/{uuid}) so CDN hosts, TLS ports and
+// fragment settings apply the same way they do in the subscription.
 
 function copyText(t) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -250,15 +242,21 @@ function subsTab() {
 }
 
 function settingsTab() {
-  return '<div class="card"><h2>تنظیمات و اطلاعات</h2>' +
+  return '<div class="card"><h2>CDN / کلین‌آی‌پی و فرگمنت</h2>' +
+    '<p class="muted" style="margin-bottom:8px">این مقادیر در اشتراک همه کاربران اعمال می‌شود؛ کاربر فقط لینکش را آپدیت می‌کند.</p>' +
+    '<div class="kv"><div><label>هاست‌های CDN / کلین‌آی‌پی (هر خط یک دامنه)</label><textarea id="s-cdn" class="ltr" rows="4">' + escHtml((settings.cdnHosts || []).join('\n')) + '</textarea></div>' +
+    '<div><label>پورت‌های TLS (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
+    '<label style="margin-top:12px">فرگمنت (شکستن TLS ClientHello برای عبور از DPI)</label>' +
+    '<button class="small ' + (settings.fragment ? '' : 'ghost') + '" data-act="save-settings" data-frag="' + (!settings.fragment) + '">' + (settings.fragment ? 'فعال ✓' : 'غیرفعال') + '</button></div></div>' +
+    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-settings">ذخیره CDN/پورت‌ها</button></div></div>' +
+    '<div class="card"><h2>تنظیمات کلی</h2>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap">' +
     '<div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b>' +
-    '<div class="muted" style="margin-top:3px">هر کشوری در کاتالوگ زنده، خودش یک لوکیشن قابل استفاده در <code>/route/{code}</code> است — بدون نیاز به ثبت دستی.</div></div>' +
+    '<div class="muted" style="margin-top:3px">هر کشوری در کاتالوگ زنده، خودش یک لوکیشن قابل استفاده در <code>/route/{code}</code> است.</div></div>' +
     '<button class="small ' + (settings.catalogRouting ? '' : 'ghost') + '" data-act="toggle-catalog">' + (settings.catalogRouting ? 'فعال ✓' : 'غیرفعال') + '</button></div>' +
     '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">' +
-    '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code></p>' +
-    '<p class="muted" style="margin:8px 0">مسیر پنل: <code>' + PANEL + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌های دستی: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
-    '<p class="muted" style="margin:8px 0">تونل مستقیم: <code>/{uuid}</code> — تونل کشوری: <code>/route/{code}</code> (اول پروکسی‌های دستی، بعد کاتالوگ زنده، آخر خروج مستقیم)</p>' +
+    '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌های دستی: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
+    '<p class="muted" style="margin:8px 0">تونل مستقیم: <code>/{uuid}</code> — تونل کشوری: <code>/route/{code}</code> (دستی → کاتالوگ زنده → خروج مستقیم)</p>' +
     '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code></p></div>';
 }
 
@@ -267,6 +265,21 @@ async function toggleCatalogRouting() {
     var r = await api('/settings', 'POST', JSON.stringify({ catalogRouting: !settings.catalogRouting }));
     settings = r.settings || settings;
     toast(settings.catalogRouting ? 'مسیریابی کاتالوگ فعال شد' : 'مسیریابی کاتالوگ خاموش شد');
+    render();
+  } catch (e) { toast('خطا: ' + e.message, false); }
+}
+
+async function saveSettingsForm(fragToggle) {
+  var body = {};
+  if (fragToggle !== undefined) body.fragment = fragToggle;
+  if ($('s-cdn')) {
+    body.cdnHosts = $('s-cdn').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    body.ports = $('s-ports').value.split(',').map(function (s) { return parseInt(s.trim(), 10); }).filter(function (n) { return n > 0; });
+  }
+  try {
+    var r = await api('/settings', 'POST', JSON.stringify(body));
+    settings = r.settings || settings;
+    toast('تنظیمات ذخیره شد — اشتراک کاربران با آپدیت بعدی تغییر می‌کند');
     render();
   } catch (e) { toast('خطا: ' + e.message, false); }
 }
@@ -297,9 +310,10 @@ async function refresh() {
 
 
 // One delegated click handler resolves every data-act button (tabs, rows, dialogs).
+// closest() so clicks on inner elements (icons, spans) still hit the handler.
 document.addEventListener('click', function (e) {
-  var el = e.target;
-  if (!el || !el.getAttribute) return;
+  var el = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+  if (!el) return;
   var act = el.getAttribute('data-act');
   if (!act) return;
   var arg = el.getAttribute('data-arg') || '';
@@ -326,15 +340,33 @@ document.addEventListener('click', function (e) {
   if (act === 'cat-proto') { catProto = arg; openCountry(catOpenCountry); return; }
   if (act === 'cat-add') return addCatalogProxies(arg);
   if (act === 'toggle-catalog') return toggleCatalogRouting();
+  if (act === 'save-settings') return saveSettingsForm(arg === 'true' ? true : arg === 'false' ? false : undefined);
 });
 
 window.showUserDlg = function (uuid) {
   editingUuid = uuid || '';
   var u = editingUuid ? users.find(function (x) { return x.uuid === editingUuid; }) : null;
-  var copts = locs.map(function (l) {
-    var sel = (u && u.countries && u.countries.indexOf(l.code) >= 0) ? ' selected' : '';
-    return '<option value="' + escHtml(l.code) + '"' + sel + '>' +
-      escHtml(String(l.code).toUpperCase() + (l.name ? ' — ' + l.name : '')) + '</option>';
+  // Locations = manual locations + live catalog countries (catalog wins for
+  // display names). For a NEW user the top catalog countries are pre-checked
+  // so every user is multi-location by default.
+  var catMap = {};
+  if (cat) for (var i = 0; i < cat.countries.length; i++) catMap[cat.countries[i].code.toLowerCase()] = cat.countries[i];
+  var opts = [];
+  var seenCodes = {};
+  for (var j = 0; j < locs.length; j++) {
+    var l = locs[j];
+    seenCodes[l.code] = true;
+    opts.push({ code: l.code, label: (l.code.toUpperCase() + ' — ' + (l.name || 'دستی')), sel: !!(u && u.countries && u.countries.indexOf(l.code) >= 0) });
+  }
+  var catCodes = Object.keys(catMap).sort(function (a, b) { return (catMap[b].total || 0) - (catMap[a].total || 0); }).slice(0, 40);
+  for (var k = 0; k < catCodes.length; k++) {
+    if (seenCodes[catCodes[k]]) continue;
+    seenCodes[catCodes[k]] = true;
+    var c = catMap[catCodes[k]];
+    opts.push({ code: catCodes[k], label: (catCodes[k].toUpperCase() + ' — ' + (c.name || 'کاتالوگ') + ' (' + c.total + ')'), sel: u ? !!(u.countries && u.countries.indexOf(catCodes[k]) >= 0) : k < 5 });
+  }
+  var copts = opts.map(function (o) {
+    return '<option value="' + escHtml(o.code) + '"' + (o.sel ? ' selected' : '') + '>' + escHtml(o.label) + '</option>';
   }).join('');
   openDlg('<h2>' + (u ? 'ویرایش کاربر' : 'کاربر جدید') + '</h2>' +
     '<div class="kv"><div><label>نام</label><input id="f-remark" value="' + (u ? escHtml(u.remark) : '') + '"></div>' +
@@ -343,8 +375,8 @@ window.showUserDlg = function (uuid) {
     '<div><label>انقضا (روز — 0 = بی‌نهایت)</label><input id="f-expire" type="number" min="0" value="' + (u && u.expire ? Math.ceil((u.expire - Date.now() / 1000) / 86400) : 0) + '"></div>' +
     '<div><label>حد اتصال همزمان (0 = بی‌نهایت)</label><input id="f-cc" type="number" min="0" value="' + (u ? (u.concurrent_connections || 0) : 0) + '"></div>' +
     '<div><label>پروکسی اختصاصی (خالی = خودکار)</label><input id="f-proxyip" class="ltr" value="' + (u ? escHtml(u.proxy_ip || '') : '') + '"></div></div>' +
-    '<label>کشورها (خالی = مسیر پیش‌فرض)</label>' +
-    '<select id="f-countries" multiple size="4">' + copts + '</select>' +
+    '<label>لوکیشن‌ها (چندگزینه‌ای — دستی + کاتالوگ زنده؛ جدید: ۵ کشور برتر پیش‌فرض)</label>' +
+    '<select id="f-countries" multiple size="8">' + copts + '</select>' +
     '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-user">ذخیره</button>' +
     '<button class="small ghost" data-act="dlg-close">انصراف</button></div>');
 };
@@ -375,14 +407,18 @@ window.toggleUser = async function (uuid) {
   try { await api('/user/' + uuid, 'POST'); await refresh(); } catch (e) { alert('خطا: ' + e.message); }
 };
 
-window.showLinks = function (uuid) {
+window.showLinks = async function (uuid) {
   var u = users.find(function (x) { return x.uuid === uuid; });
   if (!u) return;
-  currentLinks = linksFor(u);
-  var body = currentLinks.map(function (l) { return '<div class="cfg ltr">' + escHtml(l) + '</div>'; }).join('');
+  openDlg('<h2>لینک‌های اتصال — ' + escHtml(u.remark) + '</h2><p class="muted">در حال تولید لینک‌ها…</p>');
+  try {
+    var r = await api('/links/' + encodeURIComponent(uuid));
+    currentLinks = r.configs || [];
+  } catch (e) { toast('خطا: ' + e.message, false); currentLinks = []; }
+  var body = currentLinks.map(function (l) { return '<div class="cfg ltr">' + escHtml(l) + '</div>'; }).join('') || '<p class="muted">لینکی تولید نشد</p>';
   openDlg('<h2>لینک‌های اتصال — ' + escHtml(u.remark) + '</h2>' +
-    '<p class="muted">در کلاینت VLESS (v2rayNG، Streisand، Hiddify، Nekobox و…) ایمپورت کنید:</p>' +
-    '<div style="margin-top:10px">' + body + '</div>' +
+    '<p class="muted">دامنه ورکر + CDN/کلین‌آی‌پی × پورت‌های TLS — در کلاینت VLESS ایمپورت کنید:</p>' +
+    '<div style="margin-top:10px;max-height:280px;overflow:auto">' + body + '</div>' +
     '<div class="actions" style="margin-top:10px"><button class="small" data-act="copy-all">کپی همه</button>' +
     '<button class="small ghost" data-act="dlg-close">بستن</button></div>');
 };
