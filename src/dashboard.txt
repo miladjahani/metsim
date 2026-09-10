@@ -2,8 +2,8 @@
 // Plain browser JS (no build step); loaded via Wrangler Text import.
 var PANEL = '/spider';
 var users = [], locs = [], subs = [], active = 'users';
-var settings = { catalogRouting: true };
-var editingUuid = '', editingLoc = '', currentLinks = [];
+var settings = { catalogRouting: true, cdnHosts: [], cleanIps: [], ports: [443], fragment: true, outboundMode: 'proxy-first', ech: false, alpn: [] };
+var editingUuid = '', editingLoc = '', currentLinks = [], latencyResults = [];
 var cat = null, catLoading = false, catOpenCountry = '', catProto = 'all';
 
 function $(id) { return document.getElementById(id); }
@@ -233,6 +233,7 @@ function subsTab() {
       '<td><div class="actions">' +
       rowBtn('sub-copy', s.token, 'کپی لینک') +
       rowBtn('sub-copy-sb', s.token, 'sing-box') +
+      rowBtn('sub-copy-clash', s.token, 'Clash') +
       rowBtn('sub-del', s.token, 'حذف', true) +
       '</div></td></tr>';
   }).join('');
@@ -243,22 +244,33 @@ function subsTab() {
 }
 
 function settingsTab() {
-  return '<div class="card"><h2>CDN / کلین‌آی‌پی و فرگمنت</h2>' +
-    '<p class="muted" style="margin-bottom:8px">این مقادیر در اشتراک همه کاربران اعمال می‌شود؛ کاربر فقط لینکش را آپدیت می‌کند.</p>' +
-    '<div class="kv"><div><label>هاست‌های CDN / کلین‌آی‌پی (هر خط یک دامنه)</label><textarea id="s-cdn" class="ltr" rows="4">' + escHtml((settings.cdnHosts || []).join('\n')) + '</textarea></div>' +
+  var alpn = settings.alpn || [];
+  return '<div class="card"><h2>تنظیمات اتصال و اشتراک</h2>' +
+    '<p class="muted" style="margin-bottom:8px">تغییرات سمت Worker اعمال می‌شوند؛ کاربر نهایی فقط اشتراک خود را Refresh می‌کند.</p>' +
+    '<div class="kv"><div><label>هاست‌های CDN (هر خط یک دامنه)</label><textarea id="s-cdn" class="ltr" rows="4">' + escHtml((settings.cdnHosts || []).join('\n')) + '</textarea></div>' +
+    '<div><label>کلین‌آی‌پی‌ها (IP یا IP:Port، هر خط یک مورد)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
     '<div><label>پورت‌های TLS (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
-    '<label style="margin-top:12px">فرگمنت (شکستن TLS ClientHello برای عبور از DPI)</label>' +
-    '<button class="small ' + (settings.fragment ? '' : 'ghost') + '" data-act="save-settings" data-frag="' + (!settings.fragment) + '">' + (settings.fragment ? 'فعال ✓' : 'غیرفعال') + '</button></div></div>' +
-    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-settings">ذخیره CDN/پورت‌ها</button></div></div>' +
-    '<div class="card"><h2>تنظیمات کلی</h2>' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap">' +
-    '<div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b>' +
-    '<div class="muted" style="margin-top:3px">هر کشوری در کاتالوگ زنده، خودش یک لوکیشن قابل استفاده در <code>/route/{code}</code> است.</div></div>' +
+    '<label>حالت خروجی</label><select id="s-outbound"><option value="proxy-first"' + (settings.outboundMode === 'proxy-first' ? ' selected' : '') + '>اول پروکسی، سپس مستقیم</option><option value="direct-first"' + (settings.outboundMode === 'direct-first' ? ' selected' : '') + '>اول مستقیم، سپس پروکسی</option><option value="proxy-only"' + (settings.outboundMode === 'proxy-only' ? ' selected' : '') + '>فقط پروکسی (بدون نشت خروجی)</option></select></div>' +
+    '<div><label>ALPN (اختیاری)</label><select id="s-alpn" multiple size="3"><option value="h3"' + (alpn.indexOf('h3') >= 0 ? ' selected' : '') + '>h3</option><option value="h2"' + (alpn.indexOf('h2') >= 0 ? ' selected' : '') + '>h2</option><option value="http/1.1"' + (alpn.indexOf('http/1.1') >= 0 ? ' selected' : '') + '>http/1.1</option></select></div>' +
+    '<div><label>گزینه‌های TLS</label><label style="display:flex;gap:8px;align-items:center"><input id="s-ech" type="checkbox" style="width:auto"' + (settings.ech ? ' checked' : '') + '> فعال‌سازی ECH</label>' +
+    '<label style="margin-top:12px">فرگمنت TLS</label><button class="small ' + (settings.fragment ? '' : 'ghost') + '" data-act="save-settings" data-frag="' + (!settings.fragment) + '">' + (settings.fragment ? 'فعال ✓' : 'غیرفعال') + '</button></div></div>' +
+    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-settings">ذخیره تنظیمات</button></div></div>' +
+    '<div class="card"><h2>مسیریابی و فرمت‌ها</h2>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap"><div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b><div class="muted" style="margin-top:3px">هر کشور کاتالوگ به‌صورت خودکار مسیر چندلوکیشنی می‌سازد.</div></div>' +
     '<button class="small ' + (settings.catalogRouting ? '' : 'ghost') + '" data-act="toggle-catalog">' + (settings.catalogRouting ? 'فعال ✓' : 'غیرفعال') + '</button></div>' +
-    '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">' +
-    '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌های دستی: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
-    '<p class="muted" style="margin:8px 0">تونل مستقیم: <code>/{uuid}</code> — تونل کشوری: <code>/route/{code}</code> (دستی → کاتالوگ زنده → خروج مستقیم)</p>' +
-    '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code> — قالب sing-box: <code>/sub/{token}?target=singbox</code></p></div>';
+    '<p class="muted" style="margin:8px 0">دامنه Worker: <code>' + location.host + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌ها: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
+    '<p class="muted" style="margin:8px 0">VLESS: <code>' + location.origin + '/sub/{token}</code> — sing-box: <code>?target=singbox</code> — Clash: <code>?target=clash</code></p></div>';
+}
+
+function latencyTab() {
+  var rows = (latencyResults || []).map(function (r) {
+    return '<tr><td class="ltr">' + escHtml(r.host) + ':' + r.port + '</td><td>' + (r.ok ? '<span class="pill ok">' + r.ms + ' ms</span>' : '<span class="pill off">ناموفق</span>') + '</td></tr>';
+  }).join('') || '<tr><td colspan="2" class="muted" style="text-align:center;padding:20px">هنوز تستی انجام نشده است</td></tr>';
+  return '<div class="card"><h2>آزمایش تأخیر کلین‌آی‌پی</h2><p class="muted">IPها را با کاما، فاصله یا خط جدید وارد کنید. Worker با TCP تست می‌کند؛ فقط موارد موفق را برای اشتراک ذخیره کنید.</p>' +
+    '<textarea id="lat-targets" class="ltr" rows="5">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea>' +
+    '<div class="actions" style="margin-top:10px"><button class="small" data-act="run-latency">تست تأخیر</button><button class="small ghost" data-act="save-latency">ذخیره نتایج موفق به‌عنوان کلین‌آی‌پی</button></div>' +
+    '<p class="muted" style="margin-top:10px">نکته: تست TCP فقط دسترسی به پورت را می‌سنجد؛ قبل از انتشار، اتصال واقعی با کلاینت را هم بررسی کنید.</p></div>' +
+    '<div class="card tbwrap"><table><thead><tr><th>هدف</th><th>نتیجه</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function toggleCatalogRouting() {
@@ -275,7 +287,11 @@ async function saveSettingsForm(fragToggle) {
   if (fragToggle !== undefined) body.fragment = fragToggle;
   if ($('s-cdn')) {
     body.cdnHosts = $('s-cdn').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    body.cleanIps = $('s-ips').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
     body.ports = $('s-ports').value.split(',').map(function (s) { return parseInt(s.trim(), 10); }).filter(function (n) { return n > 0; });
+    body.outboundMode = $('s-outbound').value;
+    body.ech = $('s-ech').checked;
+    body.alpn = Array.prototype.map.call($('s-alpn').selectedOptions, function (o) { return o.value; });
   }
   try {
     var r = await api('/settings', 'POST', JSON.stringify(body));
@@ -292,6 +308,7 @@ function render() {
   else if (active === 'locs') body = locsTab();
   else if (active === 'subs') body = subsTab();
   else if (active === 'catalog') body = catalogTab();
+  else if (active === 'latency') body = latencyTab();
   else body = settingsTab();
   v.innerHTML = (active !== 'settings' ? statCards() : '') + body;
   var tabs = document.querySelectorAll('.tabs button');
@@ -330,6 +347,7 @@ document.addEventListener('click', function (e) {
   if (act === 'sub-new') return showSubDlg();
   if (act === 'sub-copy') return copySub(arg);
   if (act === 'sub-copy-sb') return copySub(arg, '?target=singbox');
+  if (act === 'sub-copy-clash') return copySub(arg, '?target=clash');
   if (act === 'sub-del') return delSub(arg);
   if (act === 'save-user') return saveUser(editingUuid);
   if (act === 'save-loc') return saveLoc(editingLoc);
@@ -343,6 +361,8 @@ document.addEventListener('click', function (e) {
   if (act === 'cat-add') return addCatalogProxies(arg);
   if (act === 'toggle-catalog') return toggleCatalogRouting();
   if (act === 'save-settings') return saveSettingsForm(arg === 'true' ? true : arg === 'false' ? false : undefined);
+  if (act === 'run-latency') return runLatency();
+  if (act === 'save-latency') return saveLatencyResults();
 });
 
 window.showUserDlg = function (uuid) {
@@ -483,6 +503,27 @@ window.saveSub = async function () {
 };
 
 window.copySub = function (token, query) { copyText(location.origin + '/sub/' + token + (query || '')); };
+
+window.runLatency = async function () {
+  var input = $('lat-targets');
+  if (!input) return;
+  try {
+    var r = await api('/latency', 'POST', JSON.stringify({ targets: input.value }));
+    latencyResults = r.results || [];
+    render();
+  } catch (e) { toast('خطا در تست IP: ' + e.message, false); }
+};
+
+window.saveLatencyResults = async function () {
+  var good = (latencyResults || []).filter(function (r) { return r.ok; }).map(function (r) { return r.host + ':' + r.port; });
+  if (!good.length) { toast('ابتدا حداقل یک IP موفق تست کنید', false); return; }
+  try {
+    var r = await api('/settings', 'POST', JSON.stringify({ cleanIps: good }));
+    settings = r.settings || settings;
+    toast('کلین‌آی‌پی‌های موفق ذخیره شدند ✓');
+    render();
+  } catch (e) { toast('خطا در ذخیره IP: ' + e.message, false); }
+};
 
 window.delSub = async function (token) {
   if (!confirm('این اشتراک حذف شود؟')) return;

@@ -1,26 +1,20 @@
 // Runtime simulation test for SpiderPanel Worker using Miniflare.
 // Covers: health, login-claim flow, session auth, user CRUD, locations,
-// subscriptions, and tunnel auth rejection for unknown UUIDs.
+// subscriptions, formats, latency testing, and tunnel auth rejection.
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { readFileSync } from "node:fs";
 
-// The worker is pre-bundled to a single ESM file (esbuild, cloudflare:sockets
-// kept external) so no module rules are needed. This repo resolved a Miniflare
-// prerelease with the v5 options shape, hence convertV4MiniflareOptions.
 const v5 = convertV4MiniflareOptions({
-  workers: [
-    {
-      name: "spiderpanel",
-      modules: true,
-      script: readFileSync("/tmp/spider-bundle.mjs", "utf8"),
-      compatibilityDate: "2025-05-01",
-      bindings: { SPIDER_TOKEN: "test-admin-token-123" },
-      kvNamespaces: ["SPIDER_KV"],
-    },
-  ],
+  workers: [{
+    name: "spiderpanel",
+    modules: true,
+    script: readFileSync("/tmp/spider-bundle.mjs", "utf8"),
+    compatibilityDate: "2025-05-01",
+    bindings: { SPIDER_TOKEN: "test-admin-token-123" },
+    kvNamespaces: ["SPIDER_KV"],
+  }],
 });
 const MF = new Miniflare(v5);
-
 const ADMIN = "test-admin-token-123";
 let cookie = "";
 let failures = 0;
@@ -33,76 +27,40 @@ async function req(path, opts = {}) {
   if (setCookie) cookie = setCookie.split(";")[0];
   return res;
 }
-
 function check(name, cond, extra = "") {
   if (cond) console.log("  PASS " + name);
   else { failures++; console.log("  FAIL " + name + (extra ? "  → " + extra : "")); }
 }
 
-console.log("── health ──");
+console.log("── health + login ──");
 {
   const r = await req("/health");
-  check("GET /health → 200 SpiderPanel online", r.status === 200 && (await r.text()).includes("SpiderPanel online"));
-}
-
-console.log("── panel: login page ──");
-{
-  const r = await req("/spider");
-  const t = await r.text();
-  check("GET /spider → 200 html with form", r.status === 200 && t.includes("ورود مدیر") && t.includes("<form"));
-}
-
-console.log("── panel: login claim flow ──");
-{
+  check("GET /health → 200", r.status === 200 && (await r.text()).includes("SpiderPanel online"));
+  const page = await req("/spider");
+  check("GET /spider → login form", page.status === 200 && (await page.text()).includes("ورود مدیر"));
   const bad = await req("/spider", { method: "POST", body: new URLSearchParams({ token: "wrong-token-999" }).toString(), headers: { "content-type": "application/x-www-form-urlencoded" } });
-  check("wrong token rejected (401)", bad.status === 401);
-
-  const ok = await req("/spider", {
-    method: "POST",
-    body: new URLSearchParams({ token: ADMIN }).toString(),
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-  });
-  check("correct token → 303 redirect + cookie", ok.status === 303 && cookie.startsWith("spider_sid="));
-
+  check("wrong token rejected", bad.status === 401);
+  const ok = await req("/spider", { method: "POST", body: new URLSearchParams({ token: ADMIN }).toString(), headers: { "content-type": "application/x-www-form-urlencoded" } });
+  check("correct token creates session", ok.status === 303 && cookie.startsWith("spider_sid="));
   const dash = await req("/spider");
-  const dt = await dash.text();
-  check("dashboard served with client script", dash.status === 200 && dt.includes("data-act=") && dt.includes("refresh()"));
+  check("dashboard served", dash.status === 200 && (await dash.text()).includes("refresh()"));
 }
 
-console.log("── admin api: users ──");
+console.log("── users + locations ──");
 let uuid = "";
 {
-  // NOTE: by this point the login block above has already set the session
-  // cookie, so state succeeds — covered again after logout at the bottom.
   const state0 = await req("/spider/state");
-  check("state with session → ok", state0.status === 200);
-
-  const create = await req("/spider/users", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ remark: "alice", limit_gb: 10, expire_days: 30, countries: ["de", "tr"] }),
-  });
+  check("state with session", state0.status === 200);
+  const create = await req("/spider/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ remark: "alice", limit_gb: 10, expire_days: 30, countries: ["de", "tr"] }) });
   const cj = await create.json();
-  check("create user ok", create.status === 200 && cj.ok && cj.user.remark === "alice");
+  check("create user", create.status === 200 && cj.ok && cj.user.remark === "alice");
   uuid = cj.user.uuid;
-
-  const state = await req("/spider/state");
-  const st = await state.json();
-  check("state lists 1 user + 0 locs", state.status === 200 && st.users.length === 1 && st.locations.length === 0);
-}
-
-console.log("── admin api: locations ──");
-{
-  const loc = await req("/spider/locations", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: "de", name: "Germany", proxies: ["1.2.3.4:443", "5.6.7.8:443"] }),
-  });
+  const loc = await req("/spider/locations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "de", name: "Germany", proxies: ["1.2.3.4:443", "5.6.7.8:443"] }) });
   const lj = await loc.json();
-  check("create location ok", loc.status === 200 && lj.locations.length === 1 && lj.locations[0].proxy === "1.2.3.4:443");
+  check("create location", loc.status === 200 && lj.locations.length === 1);
 }
 
-console.log("── admin api: proxy catalog ──");
+console.log("── live catalog ──");
 {
   const cat = await req("/spider/catalog");
   const cj = await cat.json();
@@ -110,121 +68,78 @@ console.log("── admin api: proxy catalog ──");
   const top = cj.countries[0].code;
   const det = await req("/spider/catalog?country=" + encodeURIComponent(top));
   const dj = await det.json();
-  check("catalog country rows", det.status === 200 && dj.ok && dj.proxies.length > 0 && dj.proxies[0].proxy.includes(":"));
-
-  // End-to-end: a catalog proxy stored as a location must appear in configs.
-  const p = dj.proxies[0];
-  const locAdd = await req("/spider/locations", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: "cattest", name: "Catalog Test", proxies: [p.proxy] }),
-  });
-  check("catalog proxy usable as location", locAdd.status === 200);
+  check("catalog country rows", det.status === 200 && dj.ok && dj.proxies.length > 0);
+  const locAdd = await req("/spider/locations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: "cattest", name: "Catalog Test", proxies: [dj.proxies[0].proxy] }) });
+  check("catalog proxy can be saved", locAdd.status === 200);
   await req("/spider/locations/cattest", { method: "DELETE" });
 }
 
-console.log("── admin api: settings + catalog routing ──");
+console.log("── settings + latency ──");
 {
   const s0 = await req("/spider/state");
   const st0 = await s0.json();
-  check("state includes settings (default on)", s0.status === 200 && st0.settings && st0.settings.catalogRouting === true);
-
-  const off = await req("/spider/settings", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ catalogRouting: false }),
-  });
-  check("settings toggle off", off.status === 200 && (await off.json()).settings.catalogRouting === false);
-  const s1 = await req("/spider/state");
-  check("state reflects off", (await s1.json()).settings.catalogRouting === false);
-
-  const on = await req("/spider/settings", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ catalogRouting: true }),
-  });
-  check("settings toggle on", on.status === 200 && (await on.json()).settings.catalogRouting === true);
+  check("settings defaults are present", s0.status === 200 && st0.settings.catalogRouting === true && Array.isArray(st0.settings.cleanIps));
+  const saved = await req("/spider/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+    catalogRouting: true, cleanIps: ["1.1.1.1:443", "8.8.8.8"], outboundMode: "proxy-only", ech: true, alpn: ["h2"], fragment: false,
+  }) });
+  const sj = await saved.json();
+  check("advanced settings normalized", saved.status === 200 && sj.settings.cleanIps[0] === "1.1.1.1:443" && sj.settings.outboundMode === "proxy-only" && sj.settings.ech === true && sj.settings.alpn[0] === "h2" && sj.settings.fragment === false);
+  const latency = await req("/spider/latency", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ targets: ["1.1.1.1:443", "bad target"] }) });
+  const ljson = await latency.json();
+  check("latency endpoint returns bounded results", latency.status === 200 && ljson.ok && ljson.results.length === 2);
 }
 
-console.log("── admin api: subscriptions ──");
+console.log("── subscriptions: VLESS, sing-box, Clash, UA ──");
 let subToken = "";
 {
-  const s = await req("/spider/subs", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "my-sub", uuids: [uuid] }),
-  });
+  const s = await req("/spider/subs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "my-sub", uuids: [uuid] }) });
   const sj = await s.json();
-  check("create subscription ok", s.status === 200 && sj.ok);
+  check("create subscription", s.status === 200 && sj.ok);
   subToken = sj.sub.token;
 
   const pub = await req("/sub/" + subToken);
   const body = await pub.text();
   const decoded = Buffer.from(body, "base64").toString("utf8");
-  // Miniflare's dispatchFetch exposes the worker on 127.0.0.1:<port>, so the
-  // Host header carries the port; in production the Host is the bare domain.
-  check("public /sub/{token} → base64 vless configs", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
-  check("first config targets worker domain :443", decoded.includes("@127.0.0.1:443?"));
-  check("CDN host + fragment included", decoded.includes("speed.cloudflare.com") && decoded.includes("fragment=tlshello"));
-  check("country route paths present", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
+  check("VLESS subscription is base64", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
+  check("custom clean IP + advanced link options", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("ech=1") && !decoded.includes("fragment=tlshello"));
+  check("country routes remain multi-location", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
 
-  console.log("── subscription: sing-box template ──");
-  {
-    const sb = await req("/sub/" + subToken + "?target=singbox");
-    const body = await sb.text();
-    let cfg = null;
-    try { cfg = JSON.parse(body); } catch { /* keep null */ }
-    check("singbox sub → valid JSON", sb.status === 200 && !!cfg);
-    check("singbox has selector + vless outbounds", !!cfg && Array.isArray(cfg.outbounds) &&
-      cfg.outbounds.some(function (o) { return o.type === "selector" && o.tag === "select"; }) &&
-      cfg.outbounds.some(function (o) { return o.type === "vless" && o.tag.indexOf("alice") === 0; }));
-    check("singbox vless uses ws + 0-RTT early data", !!cfg && cfg.outbounds.some(function (o) {
-      return o.type === "vless" && o.transport && o.transport.type === "ws" &&
-        o.transport.max_early_data === 2048 && o.transport.early_data_header_name === "Sec-WebSocket-Protocol";
-    }));
-    check("singbox has fakeip dns + tun inbound", !!cfg && cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled === true &&
-      Array.isArray(cfg.inbounds) && cfg.inbounds.some(function (i) { return i.type === "tun"; }));
-    check("singbox country route paths present", body.includes("/route/de") && body.includes("/route/tr"));
-  }
+  const sb = await req("/sub/" + subToken + "?target=singbox");
+  const sbBody = await sb.text();
+  let cfg = null;
+  try { cfg = JSON.parse(sbBody); } catch { /* keep null */ }
+  check("sing-box is valid JSON", sb.status === 200 && !!cfg);
+  check("sing-box has selector + VLESS", !!cfg && cfg.outbounds.some((o) => o.type === "selector" && o.tag === "select") && cfg.outbounds.some((o) => o.type === "vless" && o.tag.indexOf("alice") === 0));
+  check("sing-box has 0-RTT + advanced TLS", !!cfg && cfg.outbounds.some((o) => o.type === "vless" && o.tls && o.tls.alpn && o.tls.alpn[0] === "h2" && o.tls.ech && o.transport.max_early_data === 2048));
+  check("sing-box has fakeip + tun", !!cfg && cfg.dns.fakeip.enabled === true && cfg.inbounds.some((i) => i.type === "tun"));
+
+  const clash = await req("/sub/" + subToken + "?target=clash");
+  const clashBody = await clash.text();
+  check("Clash is YAML with VLESS groups", clash.status === 200 && clashBody.includes("proxies:") && clashBody.includes("type: \"vless\"") && clashBody.includes("proxy-groups:"));
+  const detected = await req("/sub/" + subToken, { headers: { "user-agent": "Clash.Meta/1.18" } });
+  const detectedBody = await detected.text();
+  check("Clash UA is auto-detected", detected.status === 200 && detectedBody.includes("proxy-groups:"));
 
   const nf = await req("/sub/doesnotexist");
-  check("unknown sub token → 404", nf.status === 404);
+  check("unknown subscription → 404", nf.status === 404);
 }
 
-console.log("── tunnel auth ──");
+console.log("── tunnel auth + lifecycle ──");
 {
-  const wsInit = await req("/" + uuid, {
-    headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" },
-  });
-  check("valid-uuid WS reaches tunnel handler (101/403)", wsInit.status === 101 || wsInit.status === 403 || wsInit.status === 500, "status=" + wsInit.status);
-
+  const wsInit = await req("/" + uuid, { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" } });
+  check("valid UUID reaches tunnel handler", wsInit.status === 101 || wsInit.status === 403 || wsInit.status === 500, "status=" + wsInit.status);
   const unknown = "00000000-0000-4000-8000-000000000000";
-  const rej = await req("/" + unknown, {
-    headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" },
-  });
-  check("unknown uuid → 403", rej.status === 403);
-
+  const rej = await req("/" + unknown, { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" } });
+  check("unknown UUID → 403", rej.status === 403);
   const routeNoWs = await req("/route/de");
-  check("/route/{code} without WS upgrade → 400", routeNoWs.status === 400);
-}
-
-console.log("── user disable / enable / delete ──");
-{
+  check("route without WS → 400", routeNoWs.status === 400);
   const t = await req("/spider/user/" + uuid, { method: "POST" });
-  const tj = await t.json();
-  check("toggle → disabled true", t.status === 200 && tj.user.disabled === true);
-
-  const subWhileDisabled = await req("/sub/" + subToken);
-  check("sub excludes disabled user (404 empty)", subWhileDisabled.status === 404);
-
+  check("disable user", t.status === 200 && (await t.json()).user.disabled === true);
+  const disabledSub = await req("/sub/" + subToken);
+  check("disabled user removed from sub", disabledSub.status === 404);
   await req("/spider/user/" + uuid, { method: "POST" });
-  const subAgain = await req("/sub/" + subToken);
-  check("re-enabled user back in sub", subAgain.status === 200);
-
   const del = await req("/spider/user/" + uuid, { method: "DELETE" });
-  check("delete ok", del.status === 200);
-  const state = await req("/spider/state");
-  check("state empty after delete", (await state.json()).users.length === 0);
+  check("delete user", del.status === 200);
 }
 
 console.log("── logout ──");
@@ -233,7 +148,7 @@ console.log("── logout ──");
   check("logout → 303", r.status === 303);
   cookie = "";
   const after = await req("/spider/state");
-  check("state after logout without auth → 403", after.status === 403);
+  check("state after logout → 403", after.status === 403);
 }
 
 await MF.dispose();

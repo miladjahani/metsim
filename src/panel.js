@@ -15,7 +15,8 @@
 import {
   UUID_RE, nowSec, randomToken, randomUuid, sha256Hex, timingSafeEq,
   getSetup, saveSetup, getUser, getUserRaw, saveUser, listUsers,
-  getLocations, saveLocations, vlessConfigsForUser, singboxConfigForUsers, getSettings, saveSettings,
+  getLocations, saveLocations, vlessConfigsForUser, singboxConfigForUsers, clashConfigForUsers, getSettings, saveSettings,
+  parseEndpoint, probeTcpEndpoint,
 } from "./tunnel.js";
 import { handleCatalog } from "./catalog.js";
 import dashboardJs from "./dashboard.txt";
@@ -66,8 +67,9 @@ async function isAdmin(request, env, url) {
 }
 
 // ── Subscription (public) ─────────────────────────────────────────────────
-// Default: base64 VLESS link list (v2ray/xray/hiddify). ?target=singbox serves
-// a full sing-box JSON template (selectors + rule-sets + fakeip).
+// Default: base64 VLESS link list (v2ray/xray/hiddify). The target query
+// supports sing-box and Clash; User-Agent detection makes normal client
+// subscription imports work without a manually chosen query string.
 export async function handleSubscription(request, env, url, token) {
   token = decodeURIComponent(token || "");
   let sub = null;
@@ -78,7 +80,10 @@ export async function handleSubscription(request, env, url, token) {
   if (!host) return new Response("Bad host", { status: 500 });
   const settings = await getSettings(env);
   const domain = host.split(":")[0];
-  const target = (url.searchParams.get("target") || "").toLowerCase();
+  const explicitTarget = (url.searchParams.get("target") || "").toLowerCase();
+  const ua = (request.headers.get("user-agent") || "").toLowerCase();
+  const target = explicitTarget || (ua.includes("sing-box") || ua.includes("singbox") ? "singbox" :
+    (ua.includes("clash") || ua.includes("stash") || ua.includes("mihomo") ? "clash" : ""));
   const users = [];
   let used = 0, limit = 0;
   for (const uuid of sub.uuids || []) {
@@ -93,11 +98,17 @@ export async function handleSubscription(request, env, url, token) {
     "profile-update-interval": "2",
   };
 
-  if (target === "singbox") {
+  if (target === "singbox" || target === "clash") {
     if (!users.length) return new Response("No active configs", { status: 404 });
-    const cfg = await singboxConfigForUsers(env, users, domain, settings);
-    return new Response(JSON.stringify(cfg, null, 2), {
-      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...info },
+    if (target === "singbox") {
+      const cfg = await singboxConfigForUsers(env, users, domain, settings);
+      return new Response(JSON.stringify(cfg, null, 2), {
+        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...info },
+      });
+    }
+    const yaml = await clashConfigForUsers(env, users, domain, settings);
+    return new Response(yaml, {
+      headers: { "content-type": "text/yaml; charset=utf-8", "cache-control": "no-store", ...info },
     });
   }
 
@@ -173,11 +184,28 @@ export async function handlePanel(request, env, url) {
     const next = {
       catalogRouting: typeof b.catalogRouting === "boolean" ? b.catalogRouting : cur.catalogRouting,
       cdnHosts: Array.isArray(b.cdnHosts) ? b.cdnHosts.map((x) => String(x).trim()).filter(Boolean) : cur.cdnHosts,
+      cleanIps: Array.isArray(b.cleanIps) ? b.cleanIps.map((x) => String(x).trim()).filter(Boolean) : cur.cleanIps,
       ports: Array.isArray(b.ports) ? b.ports.map(Number).filter((p) => p > 0 && p < 65536) : cur.ports,
       fragment: typeof b.fragment === "boolean" ? b.fragment : cur.fragment,
+      outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(b.outboundMode) ? b.outboundMode : cur.outboundMode,
+      ech: typeof b.ech === "boolean" ? b.ech : cur.ech,
+      alpn: Array.isArray(b.alpn) ? b.alpn : cur.alpn,
     };
     await saveSettings(env, next);
     return json({ ok: true, settings: await getSettings(env) });
+  }
+
+  if (sub === "/latency" && method === "POST") {
+    let b;
+    try { b = await request.json(); } catch { return json({ error: "bad json" }, 400); }
+    const raw = Array.isArray(b.targets) ? b.targets : String(b.targets || "").split(/[\s,]+/);
+    const targets = raw.map((x) => parseEndpoint(x, Number(b.port) || 443)).filter(Boolean).slice(0, 50);
+    const results = await Promise.all(targets.map(async (target) => {
+      const result = await probeTcpEndpoint(target.host, target.port, 3500);
+      return { host: target.host, port: target.port, ok: result.ok, ms: result.ms };
+    }));
+    results.sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : a.ms - b.ms));
+    return json({ ok: true, results });
   }
 
   // Server-side link generation for one user (CDN hosts × ports × countries).
@@ -373,6 +401,7 @@ function dashPage() {
     '<button class="small ghost" data-act="tab" data-arg="users">کاربران</button>' +
     '<button class="small ghost" data-act="tab" data-arg="locs">لوکیشن‌ها</button>' +
     '<button class="small ghost" data-act="tab" data-arg="catalog">کاتالوگ زنده</button>' +
+    '<button class="small ghost" data-act="tab" data-arg="latency">تست IP</button>' +
     '<button class="small ghost" data-act="tab" data-arg="subs">اشتراک‌ها</button>' +
     '<button class="small ghost" data-act="tab" data-arg="settings">تنظیمات</button>' +
     '</div>' +

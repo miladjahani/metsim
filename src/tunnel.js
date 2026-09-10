@@ -207,13 +207,22 @@ export async function saveLocations(env, locs) {
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 // catalogRouting: catalog countries act as locations automatically (default on).
-// cdnHosts: extra TLS fronting hosts (CDN / clean IPs) mixed into every user's
-//   subscription alongside the worker domain — server-side, so end users only
-//   refresh their sub link to pick up changes.
-// ports: TLS ports offered on workers.dev / CDN fronting (443, 2053, 2083…).
-// fragment: append Xray TLS-fragment option (tlshello splitting) to configs.
+// cdnHosts: extra TLS fronting hosts mixed into every user's subscription.
+// cleanIps: operator-tested Cloudflare edge IPs; these are only client-facing
+// addresses and always keep the Worker hostname as SNI/Host. They are never
+// assumed to be reachable: the panel latency test is the source of truth.
+// outboundMode: proxy-first (legacy behavior), direct-first, or proxy-only.
+// ech/alpn: opt-in client TLS hints for clients that support them.
 const CDN_DEFAULTS = ["speed.cloudflare.com", "icook.hk", "time.is", "cf.090227.xyz", "ip.sb"];
 const PORT_DEFAULTS = [443, 2053, 2083];
+const CLEAN_IP_DEFAULTS = [
+  "131.0.75.219", "141.101.75.29", "103.31.7.68", "103.22.200.13",
+  "190.93.247.3", "173.245.58.131", "104.25.185.250", "197.234.241.21",
+  "172.67.179.36", "172.64.24.33", "103.31.4.252", "198.41.211.232",
+  "173.245.62.204", "172.67.194.200", "188.114.99.255", "172.64.140.35",
+  "162.158.27.7", "198.41.132.22", "197.234.243.16", "108.162.239.41",
+];
+const ALPN_VALUES = new Set(["h3", "h2", "http/1.1"]);
 
 function normalizeSettings(s) {
   s = s && typeof s === "object" ? s : {};
@@ -223,23 +232,82 @@ function normalizeSettings(s) {
   const ports = Array.isArray(s.ports)
     ? s.ports.map(Number).filter((p) => p > 0 && p < 65536).slice(0, 6)
     : PORT_DEFAULTS.slice();
+  const cleanIps = Array.isArray(s.cleanIps)
+    ? s.cleanIps.map((x) => String(x).trim()).filter(Boolean).slice(0, 40)
+    : CLEAN_IP_DEFAULTS;
+  const alpn = Array.isArray(s.alpn)
+    ? s.alpn.map((x) => String(x).trim()).filter((x) => ALPN_VALUES.has(x)).slice(0, 3)
+    : [];
+  const outboundMode = ["proxy-first", "direct-first", "proxy-only"].includes(s.outboundMode)
+    ? s.outboundMode : "proxy-first";
   return {
     catalogRouting: s.catalogRouting !== false,
     cdnHosts: cdn.length ? cdn : CDN_DEFAULTS,
+    cleanIps: cleanIps.length ? cleanIps : CLEAN_IP_DEFAULTS,
     ports: ports.length ? ports : [443],
     fragment: s.fragment !== false,
+    outboundMode,
+    ech: s.ech === true,
+    alpn,
   };
 }
 
+const SETTINGS_CACHE = { at: 0, value: null };
+const SETTINGS_CACHE_MS = 30000;
+
 export async function getSettings(env) {
+  if (SETTINGS_CACHE.value && Date.now() - SETTINGS_CACHE.at < SETTINGS_CACHE_MS) return SETTINGS_CACHE.value;
   try {
     const s = JSON.parse((await env.SPIDER_KV.get("spider:settings")) || "null");
-    return normalizeSettings(s);
-  } catch { return normalizeSettings(null); }
+    SETTINGS_CACHE.value = normalizeSettings(s);
+  } catch { SETTINGS_CACHE.value = normalizeSettings(null); }
+  SETTINGS_CACHE.at = Date.now();
+  return SETTINGS_CACHE.value;
 }
 
 export async function saveSettings(env, s) {
-  await env.SPIDER_KV.put("spider:settings", JSON.stringify(s));
+  const value = normalizeSettings(s);
+  await env.SPIDER_KV.put("spider:settings", JSON.stringify(value));
+  SETTINGS_CACHE.value = value;
+  SETTINGS_CACHE.at = Date.now();
+  return value;
+}
+
+export function parseEndpoint(entry, defaultPort = 443) {
+  let value = String(entry || "").trim();
+  if (!value) return null;
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end < 0) return null;
+    const host = value.slice(1, end);
+    const port = value.slice(end + 1).startsWith(":") ? Number(value.slice(end + 2)) : defaultPort;
+    return host && port > 0 && port < 65536 ? { host, port } : null;
+  }
+  const last = value.lastIndexOf(":");
+  if (last > 0 && value.indexOf(":") === last) {
+    const port = Number(value.slice(last + 1));
+    if (port > 0 && port < 65536) return { host: value.slice(0, last), port };
+  }
+  return { host: value, port: defaultPort };
+}
+
+export async function probeTcpEndpoint(host, port = 443, timeoutMs = 3500) {
+  const connector = getConnector();
+  if (!connector || !host || !Number.isInteger(Number(port))) return { ok: false, ms: -1 };
+  const started = Date.now();
+  let socket = null;
+  try {
+    socket = await Promise.race([
+      connector({ hostname: String(host), port: Number(port) }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("probe timeout")), timeoutMs)),
+    ]);
+    const ms = Date.now() - started;
+    try { socket.close(); } catch { /* ignore */ }
+    return { ok: true, ms };
+  } catch {
+    try { socket && socket.close && socket.close(); } catch { /* ignore */ }
+    return { ok: false, ms: -1 };
+  }
 }
 
 function countryProxyList(loc) {
@@ -464,23 +532,33 @@ const PROBE_MAX = 8;
 const TRY_MAX = 5;
 
 export async function connectOutbound(env, country, user, targetHost, targetPort, workerHost) {
+  const settings = await getSettings(env);
   let candidates = [];
   let loc = null;
   if (country) {
     loc = (await getLocations(env)).find((x) => String(x.code || "").toLowerCase() === String(country).toLowerCase()) || null;
     candidates = await rankCountryProxies(loc);
-    const settings = await getSettings(env);
     if (settings.catalogRouting) {
       const catProxies = await getCatalogCountryProxies(env, country);
       for (const p of catProxies) {
         if (!candidates.includes(p.entry)) candidates.push(p.entry);
       }
     }
-    if (!candidates.length) return null;
+    if (!candidates.length && settings.outboundMode === "proxy-only") return null;
   } else {
     candidates = [String(user.proxy_ip || "").trim()].filter(Boolean);
   }
   let tried = 0;
+  const proxyEntries = candidates.slice();
+  const direct = () => {
+    const target = String(targetHost || "").toLowerCase();
+    if (target && target !== String(workerHost || "").toLowerCase()) return openSocket(target, targetPort);
+    return null;
+  };
+  if (settings.outboundMode === "direct-first") {
+    const first = await direct();
+    if (first) return first;
+  }
   for (const entry of candidates) {
     if (tried >= TRY_MAX) break;
     tried++;
@@ -500,11 +578,9 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
       if (conn) return conn;
     }
   }
-  // No route configured: direct connection, but never loop back into the
-  // Worker itself (the client commonly targets the Worker domain).
-  const target = String(targetHost || "").toLowerCase();
-  if (target && target !== String(workerHost || "").toLowerCase()) {
-    return openSocket(target, targetPort);
+  if (settings.outboundMode !== "proxy-only") {
+    const fallback = await direct();
+    if (fallback) return fallback;
   }
   return null;
 }
@@ -514,14 +590,6 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
 // user countries (+ the direct path). End users just refresh their sub link —
 // proxy/CDN/port changes flow into the configs automatically.
 const CONFIG_CAP = 200;
-const CLEAN_IP_DEFAULTS = [
-  "131.0.75.219", "141.101.75.29", "103.31.7.68", "103.22.200.13",
-  "190.93.247.3", "173.245.58.131", "104.25.185.250", "197.234.241.21",
-  "172.67.179.36", "172.64.24.33", "103.31.4.252", "198.41.211.232",
-  "173.245.62.204", "172.67.194.200", "188.114.99.255", "172.64.140.35",
-  "162.158.27.7", "198.41.132.22", "197.234.243.16", "108.162.239.41",
-];
-
 export async function nodesForUser(env, u, domain, settings) {
   const s = normalizeSettings(settings);
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
@@ -548,12 +616,14 @@ export async function nodesForUser(env, u, domain, settings) {
   }
   // 20 clean IPs (client → CF edge on IP, SNI/Host = worker domain) so DPI
   // blocks of the workers.dev hostname don't take the whole sub down.
-  for (const ip of CLEAN_IP_DEFAULTS) {
+  for (const rawIp of s.cleanIps) {
+    const endpoint = parseEndpoint(rawIp, 443);
+    if (!endpoint) continue;
     nodes.push({
-      tag: "CleanIP-" + ip,
+      tag: "CleanIP-" + endpoint.host + ":" + endpoint.port,
       uuid: u.uuid,
-      address: ip,
-      port: 443,
+      address: endpoint.host,
+      port: endpoint.port,
       host: domain,
       path: "/" + u.uuid,
       earlyData: 2048,
@@ -563,19 +633,106 @@ export async function nodesForUser(env, u, domain, settings) {
   return nodes.slice(0, CONFIG_CAP);
 }
 
-function vlessLink(node, fragment) {
+function vlessLink(node, settings) {
+  const s = normalizeSettings(settings);
   const q = "encryption=none&security=tls&sni=" + encodeURIComponent(node.host) +
-    "&host=" + encodeURIComponent(node.host) + "&fp=chrome&type=ws&path=" +
+    "&host=" + encodeURIComponent(node.host) + "&fp=randomized&type=ws&path=" +
     encodeURIComponent(node.path + "?ed=" + node.earlyData) +
-    (fragment ? "&fragment=tlshello,100-200,10-20" : "");
+    (s.alpn.length ? "&alpn=" + encodeURIComponent(s.alpn.join(",")) : "") +
+    (s.ech ? "&ech=1" : "") +
+    (s.fragment ? "&fragment=tlshello,100-200,10-20" : "");
   return "vless://" + node.uuid + "@" + node.address + ":" + node.port + "?" + q +
     "#" + encodeURIComponent(node.tag);
 }
 
 export async function vlessConfigsForUser(env, u, domain, settings) {
   const nodes = await nodesForUser(env, u, domain, settings);
-  const frag = normalizeSettings(settings).fragment;
-  return nodes.map((n) => vlessLink(n, frag));
+  return nodes.map((n) => vlessLink(n, settings));
+}
+
+function yamlScalar(value) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  return JSON.stringify(String(value));
+}
+
+function toYaml(value, level = 0) {
+  const pad = "  ".repeat(level);
+  if (value === null || typeof value !== "object") return yamlScalar(value);
+  const lines = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item && typeof item === "object") {
+        const nested = toYaml(item, level + 1).split("\n");
+        lines.push(pad + "-");
+        lines.push(...nested);
+      } else lines.push(pad + "- " + yamlScalar(item));
+    }
+    return lines.join("\n");
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (item === undefined) continue;
+    if (item && typeof item === "object") {
+      lines.push(pad + key + ":");
+      lines.push(toYaml(item, level + 1));
+    } else lines.push(pad + key + ": " + yamlScalar(item));
+  }
+  return lines.join("\n");
+}
+
+export async function clashConfigForUsers(env, users, domain, settings) {
+  const normalized = normalizeSettings(settings);
+  const nodeLists = await Promise.all(users.map((u) => nodesForUser(env, u, domain, normalized)));
+  const usedTags = new Set();
+  const proxies = [];
+  for (const node of nodeLists.flat().slice(0, CONFIG_CAP)) {
+    let name = node.tag;
+    let suffix = 2;
+    while (usedTags.has(name)) name = node.tag + "-" + suffix++;
+    usedTags.add(name);
+    const proxy = {
+      name,
+      type: "vless",
+      server: node.address,
+      port: node.port,
+      uuid: node.uuid,
+      udp: true,
+      tls: true,
+      servername: node.host,
+      network: "ws",
+      "ws-opts": {
+        path: node.path + "?ed=" + node.earlyData,
+        headers: { Host: node.host },
+        "max-early-data": node.earlyData,
+        "early-data-header-name": "Sec-WebSocket-Protocol",
+      },
+    };
+    if (normalized.alpn.length) proxy.alpn = normalized.alpn;
+    if (normalized.ech) proxy["ech-opts"] = { enabled: true, "query-server-name": node.host };
+    proxies.push(proxy);
+  }
+  const tags = proxies.map((p) => p.name);
+  const groups = [
+    { name: "🚀节点选择", type: "select", proxies: ["DIRECT"].concat(tags) },
+    { name: "⚡自动切换", type: "fallback", proxies: tags, url: "https://www.gstatic.com/generate_204", interval: 300 },
+  ];
+  const countries = [...new Set(nodeLists.flat().map((n) => n.country).filter(Boolean))];
+  for (const code of countries) {
+    const countryTags = proxies.filter((p) => p.name.toLowerCase().includes("-" + code.toLowerCase() + "-")).map((p) => p.name);
+    if (countryTags.length) groups.push({ name: "🌍 " + code.toUpperCase(), type: "select", proxies: ["🚀节点选择"].concat(countryTags) });
+  }
+  groups.push({ name: "🎯全球直连", type: "select", proxies: ["DIRECT"] });
+  return toYaml({
+    "mixed-port": 7890,
+    "allow-lan": false,
+    mode: "rule",
+    "log-level": "silent",
+    ipv6: false,
+    dns: { enable: true, "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16", nameserver: ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"] },
+    proxies,
+    "proxy-groups": groups,
+    rules: ["DOMAIN-SUFFIX,cn,DIRECT", "GEOIP,CN,DIRECT", "MATCH,🚀节点选择"],
+  }) + "\\n";
 }
 
 // ── sing-box template conversion ───────────────────────────────────────────
@@ -595,6 +752,8 @@ function singboxOutbound(node) {
       server_name: node.host,
       insecure: false,
       utls: { enabled: true, fingerprint: "randomized" },
+      ...(normalizeSettings(node.settings || {}).alpn.length ? { alpn: normalizeSettings(node.settings).alpn } : {}),
+      ...(normalizeSettings(node.settings || {}).ech ? { ech: { enabled: true } } : {}),
     },
     transport: {
       type: "ws",
@@ -608,8 +767,9 @@ function singboxOutbound(node) {
 }
 
 export async function singboxConfigForUsers(env, users, domain, settings) {
-  const nodeLists = await Promise.all(users.map((u) => nodesForUser(env, u, domain, settings)));
-  const nodes = nodeLists.flat().slice(0, CONFIG_CAP);
+  const normalized = normalizeSettings(settings);
+  const nodeLists = await Promise.all(users.map((u) => nodesForUser(env, u, domain, normalized)));
+  const nodes = nodeLists.flat().map((node) => ({ ...node, settings: normalized })).slice(0, CONFIG_CAP);
   const tags = nodes.map((n) => n.tag);
 
   const serviceGroups = [

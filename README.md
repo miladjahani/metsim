@@ -22,6 +22,9 @@
 - ⚡ **انتخاب سریع‌ترین پروکسی**: در هر لوکیشن، همه پروکسی‌ها با هم مسابقه تأخیر TCP می‌دهند و سریع‌ترین برنده می‌شود (با کش ۲ دقیقه‌ای)
 - 🔗 **پروتکل‌های پروکسی خروجی**: رله خام `ip:port`، `socks5://`، `http://`
 - 📱 **اشتراک‌گذاری**: لینک سابسکریپشن عمومی `/sub/{token}` برای ایمپورت در v2rayNG، Streisand، Hiddify، Nekobox و…
+- 📦 **قالب‌های آماده چندکلاینتی**: `/sub/{token}?target=singbox` برای sing-box و `/sub/{token}?target=clash` برای Clash/Mihomo؛ User-Agent کلاینت‌های sing-box و Clash نیز خودکار تشخیص داده می‌شود
+- 🧪 **تست تأخیر داخلی**: تب «تست IP» در پنل، تست TCP تا ۵۰ هدف و ذخیره‌ی نتایج موفق به‌عنوان Clean IP
+- ⚙️ **تنظیمات پیشرفته‌ی قابل تغییر در KV**: Clean IP و پورت‌ها، حالت خروجی `proxy-first` / `direct-first` / `proxy-only`، ECH، ALPN و کش ۳۰ ثانیه‌ای تنظیمات
 - 📦 **قالب sing-box**: `/sub/{token}?target=singbox` — فول کانفیگ آماده با سلکتور سرویس‌ها، rule-setهای سایت‌ها، fakeip DNS، اینباند tun + mixed و گروه urltest خودکار برای هر کشور (۰-RTT WebSocket early-data + uTLS random از قبل فعال است)
 - 🔐 **احراز هویت**: اولین لاگین، توکن مدیر را ثبت می‌کند (یا متغیر `SPIDER_TOKEN`)؛ نشست با کوکی HttpOnly به مدت ۲۴ ساعت
 - 🚫 **ضد حلقه**: اتصال به خود ورکر هرگز به داخل تونل برنمی‌گردد
@@ -90,6 +93,8 @@ npx wrangler dev
 | مسیر ورود به پنل | `/spider` |
 | مسیر اشتراک | `/sub/{token}` |
 | اشتراک قالب sing-box | `/sub/{token}?target=singbox` |
+| اشتراک قالب Clash/Mihomo | `/sub/{token}?target=clash` |
+| تست تأخیر مدیریتی | `POST /spider/latency` (حداکثر ۵۰ هدف) |
 | کاتالوگ پروکسی | `/spider/catalog` (اختیاری: `?country=DE&proto=socks5&refresh=1`) |
 | تونل مستقیم | `/{uuid}` |
 | تونل کشوری | `/route/{code}` |
@@ -118,7 +123,7 @@ src/
 └── tunnel.js     → موتور VLESS-over-WS، KV، پروکسی‌های خروجی
 ```
 
-منشأ این نسخه، پروژه [amirh00sain/SpiderPanel](https://github.com/amirh00sain/SpiderPanel) است که برای اجرای مستقیم روی Cloudflare Workers بازنویسی شده است.
+منشأ این نسخه، پروژه [amirh00sain/SpiderPanel](https://github.com/amirh00sain/SpiderPanel) است که برای اجرای مستقیم روی Cloudflare Workers بازنویسی شده است. الگوهای تنظیمات پویا، تست تأخیر، تشخیص User-Agent و پشتیبانی چندکلاینتی نیز با الهام از [byJoey/cfnew](https://github.com/byJoey/cfnew) به این معماری اضافه شده‌اند.
 
 ---
 
