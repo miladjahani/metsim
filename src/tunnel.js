@@ -155,21 +155,44 @@ export function parseVlessHeader(data) {
   let pos = 1;
   const userId = formatUuid(data.subarray(pos, pos + 16)); pos += 16;
   const addonLen = data[pos]; pos += 1 + addonLen;
+  if (pos + 4 > data.length) return null; // truncated header
   pos += 1; // command byte (1 = TCP)
   const port = (data[pos] << 8) | data[pos + 1]; pos += 2;
   const atype = data[pos]; pos += 1;
   let address;
-  if (atype === 1) { address = Array.from(data.slice(pos, pos + 4)).join("."); pos += 4; }
-  else if (atype === 2) {
+  if (atype === 1) {
+    if (pos + 4 > data.length) return null;
+    address = Array.from(data.slice(pos, pos + 4)).join("."); pos += 4;
+  } else if (atype === 2) {
+    if (pos + 1 > data.length) return null;
     const dlen = data[pos]; pos += 1;
+    if (pos + dlen > data.length) return null;
     address = dec.decode(data.subarray(pos, pos + dlen)); pos += dlen;
   } else if (atype === 3) {
+    if (pos + 16 > data.length) return null;
     const b = data.subarray(pos, pos + 16); pos += 16;
     const hex = [];
     for (let i = 0; i < 16; i += 2) hex.push(((b[i] << 8) | b[i + 1]).toString(16));
     address = hex.join(":");
   } else return null;
+  if (pos > data.length) return null;
   return { userId, address, port, payload: data.subarray(pos) };
+}
+
+// Websocket 0-RTT: clients may send the VLESS header b64url-encoded in the
+// "Sec-WebSocket-Protocol" header (path ?ed=2048). First protocol value wins.
+function earlyDataFromRequest(request) {
+  const proto = request.headers.get("sec-websocket-protocol") || "";
+  if (!proto) return null;
+  try {
+    let b64 = proto.split(",")[0].trim().replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch { return null;
+  }
 }
 
 // ── Locations (country proxies) ──────────────────────────────────────────────
@@ -486,36 +509,217 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
   return null;
 }
 
-// ── Config generation ────────────────────────────────────────────────────────
+// ── Config generation ────────────────────────────────────────────────────
 // Server-side generation: worker domain + CDN/clean-IP hosts × TLS ports ×
 // user countries (+ the direct path). End users just refresh their sub link —
 // proxy/CDN/port changes flow into the configs automatically.
-const CONFIG_CAP = 30;
+const CONFIG_CAP = 200;
+const CLEAN_IP_DEFAULTS = [
+  "131.0.75.219", "141.101.75.29", "103.31.7.68", "103.22.200.13",
+  "190.93.247.3", "173.245.58.131", "104.25.185.250", "197.234.241.21",
+  "172.67.179.36", "172.64.24.33", "103.31.4.252", "198.41.211.232",
+  "173.245.62.204", "172.67.194.200", "188.114.99.255", "172.64.140.35",
+  "162.158.27.7", "198.41.132.22", "197.234.243.16", "108.162.239.41",
+];
 
-export function vlessConfigsForUser(u, domain, settings) {
+export async function nodesForUser(env, u, domain, settings) {
   const s = normalizeSettings(settings);
-  const out = [];
-  const seen = new Set();
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
-  const hosts = [domain].concat(s.cdnHosts).slice(0, 4);
+  const hosts = [domain].concat(s.cdnHosts).slice(0, 3);
+  const nodes = [];
   for (const code of countries) {
     const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/" + u.uuid;
-    const baseName = (u.remark || "user") + (code ? " " + String(code).toUpperCase() : "");
+    const label = (u.remark || "user") + (code ? "-" + String(code).toUpperCase() : "");
+    const ports = s.ports.slice(0, 2);
     for (const host of hosts) {
-      for (const port of s.ports) {
-        if (out.length >= CONFIG_CAP) return out;
-        const key = host + ":" + port + ":" + path;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const q = "encryption=none&security=tls&sni=" + encodeURIComponent(host) +
-          "&host=" + encodeURIComponent(host) + "&fp=chrome&type=ws&path=" + encodeURIComponent(path) +
-          (s.fragment ? "&fragment=tlshello,100-200,10-20" : "");
-        const label = baseName + (host === domain ? "" : " ⭐cdn") + ":" + port;
-        out.push("vless://" + u.uuid + "@" + host + ":" + port + "?" + q + "#" + encodeURIComponent(label));
+      for (const port of ports) {
+        nodes.push({
+          tag: label + "-" + (host === domain ? "work" : "cdn") + ":" + port,
+          uuid: u.uuid,
+          address: host,
+          port,
+          host,
+          path,
+          earlyData: 2048,
+          country: code || "",
+        });
       }
     }
   }
+  // 20 clean IPs (client → CF edge on IP, SNI/Host = worker domain) so DPI
+  // blocks of the workers.dev hostname don't take the whole sub down.
+  for (const ip of CLEAN_IP_DEFAULTS) {
+    nodes.push({
+      tag: "CleanIP-" + ip,
+      uuid: u.uuid,
+      address: ip,
+      port: 443,
+      host: domain,
+      path: "/" + u.uuid,
+      earlyData: 2048,
+      country: "",
+    });
+  }
+  return nodes.slice(0, CONFIG_CAP);
+}
+
+function vlessLink(node, fragment) {
+  const q = "encryption=none&security=tls&sni=" + encodeURIComponent(node.host) +
+    "&host=" + encodeURIComponent(node.host) + "&fp=chrome&type=ws&path=" +
+    encodeURIComponent(node.path + "?ed=" + node.earlyData) +
+    (fragment ? "&fragment=tlshello,100-200,10-20" : "");
+  return "vless://" + node.uuid + "@" + node.address + ":" + node.port + "?" + q +
+    "#" + encodeURIComponent(node.tag);
+}
+
+export async function vlessConfigsForUser(env, u, domain, settings) {
+  const nodes = await nodesForUser(env, u, domain, settings);
+  const frag = normalizeSettings(settings).fragment;
+  return nodes.map((n) => vlessLink(n, frag));
+}
+
+// ── sing-box template conversion ───────────────────────────────────────────
+// Mirrors the structure of the reference template the user pointed at: fakeip
+// DNS + rule-based servers, mixed + tun inbounds, per-service selector groups
+// that all fall back to the main selector, one VLESS outbound per node with
+// ws transport + 0-RTT early data + randomized uTLS, urltest groups per country.
+function singboxOutbound(node) {
+  const out = {
+    type: "vless",
+    tag: node.tag,
+    server: node.address,
+    server_port: node.port,
+    uuid: node.uuid,
+    tls: {
+      enabled: true,
+      server_name: node.host,
+      insecure: false,
+      utls: { enabled: true, fingerprint: "randomized" },
+    },
+    transport: {
+      type: "ws",
+      path: node.path + "?ed=" + node.earlyData,
+      headers: { Host: node.host },
+      max_early_data: node.earlyData,
+      early_data_header_name: "Sec-WebSocket-Protocol",
+    },
+  };
   return out;
+}
+
+export async function singboxConfigForUsers(env, users, domain, settings) {
+  const nodeLists = await Promise.all(users.map((u) => nodesForUser(env, u, domain, settings)));
+  const nodes = nodeLists.flat().slice(0, CONFIG_CAP);
+  const tags = nodes.map((n) => n.tag);
+
+  const serviceGroups = [
+    { tag: "🌐 国外媒体", first: "select" },
+    { tag: "📲 电报信息", first: "select" },
+    { tag: "🌐 谷歌服务", first: "select" },
+    { tag: "🤖 OpenAI", first: "select" },
+    { tag: "Ⓜ️ 微软服务", first: "direct" },
+    { tag: "🍎 苹果服务", first: "direct" },
+    { tag: "📺 哔哩哔哩", first: "direct" },
+    { tag: "📹 油管视频", first: "select" },
+    { tag: "🎬 奈飞视频", first: "select" },
+    { tag: "🐟 漏网之鱼", first: "select" },
+  ];
+  const outbounds = [];
+  outbounds.push({ type: "selector", tag: "select", outbounds: ["direct"].concat(tags), default: tags[0] || "direct" });
+  for (const g of serviceGroups) {
+    outbounds.push({ type: "selector", tag: g.tag, outbounds: [g.first, "select"].concat(tags) });
+  }
+  outbounds.push({ type: "selector", tag: "🎯 全球直连", outbounds: ["direct"] });
+  for (const n of nodes) outbounds.push(singboxOutbound(n));
+
+  // Country urltest groups for the countries actually present in the sub.
+  const byCountry = new Map();
+  for (const n of nodes) {
+    if (!n.country) continue;
+    if (!byCountry.has(n.country)) byCountry.set(n.country, []);
+    byCountry.get(n.country).push(n.tag);
+  }
+  for (const [code, ts] of byCountry) {
+    if (ts.length > 1) outbounds.push({ type: "urltest", tag: "⚡ " + code.toUpperCase() + " 自动", outbounds: ts, tolerance: 50 });
+  }
+
+  return {
+    log: { level: "info", timestamp: true },
+    dns: {
+      servers: [
+        { tag: "remote", address: "https://223.5.5.5/dns-query", detour: "select" },
+        { tag: "local", address: "223.5.5.5", detour: "direct" },
+        { tag: "fakeip", address: "fakeip" },
+        { tag: "block", address: "rcode://success" },
+      ],
+      rules: [
+        { outbound: "any", server: "local" },
+        { rule_set: "geosite-category-ads-all", server: "block" },
+        { rule_set: "geosite-cn", server: "local" },
+        { query_type: ["A", "AAAA"], server: "fakeip" },
+      ],
+      fakeip: { enabled: true, inet4_range: "198.18.0.0/15", inet6_range: "fc00::/18" },
+      independent_cache: true,
+      strategy: "ipv4_only",
+    },
+    inbounds: [
+      {
+        type: "mixed", tag: "mixed-in", listen: "127.0.0.1", listen_port: 2080,
+        sniff: true, sniff_override_destination: true,
+      },
+      {
+        type: "tun", tag: "tun-in", interface_name: "sing-box",
+        address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+        mtu: 9000, auto_route: true, strict_route: true, stack: "mixed",
+        sniff: true, sniff_override_destination: true,
+      },
+    ],
+    outbounds,
+    route: {
+      auto_detect_interface: true,
+      rules: [
+        { action: "sniff" },
+        { protocol: "dns", action: "hijack-dns" },
+        { ip_is_private: true, outbound: "direct" },
+        { rule_set: ["geosite-cn"], outbound: "🎯 全球直连" },
+        { rule_set: ["geoip-cn"], outbound: "🎯 全球直连" },
+        { rule_set: ["geosite-openai"], outbound: "🤖 OpenAI" },
+        { rule_set: ["geosite-netflix"], outbound: "🎬 奈飞视频" },
+        { rule_set: ["geosite-category-ads-all"], outbound: "🎯 全球直连" },
+        { rule_set: ["geosite-google", "geosite-youtube"], outbound: "📹 油管视频" },
+        { rule_set: ["geosite-telegram"], outbound: "📲 电报信息" },
+        { rule_set: ["geosite-microsoft", "geosite-github"], outbound: "Ⓜ️ 微软服务" },
+        { rule_set: ["geosite-apple"], outbound: "🍎 苹果服务" },
+        { rule_set: ["geosite-category-entertainment", "geosite-bilibili"], outbound: "📺 哔哩哔哩" },
+        { rule_set: ["geosite-googlefcm"], outbound: "🎯 全球直连" },
+        { rule_set: ["geosite-category-games"], outbound: "🐟 漏网之鱼" },
+        { outbound: "any", server: "local" },
+        { ip_cidr: ["223.5.5.5/32"], outbound: "direct" },
+      ],
+      rule_set: [
+        { type: "remote", tag: "geosite-cn", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", download_detour: "select" },
+        { type: "remote", tag: "geoip-cn", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-openai", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-netflix", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-category-ads-all", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-google", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-youtube", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-telegram", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-microsoft", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-microsoft.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-github", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-apple", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-apple.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-bilibili", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-bilibili.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-category-entertainment", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-entertainment.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-googlefcm", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-googlefcm.srs", download_detour: "select" },
+        { type: "remote", tag: "geosite-category-games", format: "binary", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-games.srs", download_detour: "select" },
+      ],
+      final: "🐟 漏网之鱼",
+    },
+    experimental: {
+      cache_file: { enabled: true, store_fakeip: true },
+      clash_api: { external_controller: "127.0.0.1:9090", default_mode: "rule" },
+    },
+  };
 }
 
 // ── VLESS WebSocket tunnel ───────────────────────────────────────────────────
@@ -528,9 +732,18 @@ export async function handleVlessWs(request, env, country, preUser) {
   const usage = { p: 0 };
   const workerHost = (request && request.headers.get("host")) || "";
 
+  // 0-RTT: the first WS message may already be in flight when this runs, so
+  // the queued header is consumed lazily on the first message event.
   server.addEventListener("message", async (ev) => {
-    const data = new Uint8Array(ev.data);
+    let data = new Uint8Array(ev.data);
     if (!server.__h) {
+      const early = server.__early || (server.__early = earlyDataFromRequest(request));
+      if (early && early.length) {
+        const merged = new Uint8Array(early.length + data.length);
+        merged.set(early); merged.set(data, early.length);
+        data = merged;
+        server.__early = null;
+      }
       const h = parseVlessHeader(data);
       if (!h) { try { server.close(4002, "bad header"); } catch { /* ignore */ } return; }
       server.__h = h;
@@ -561,6 +774,7 @@ export async function handleVlessWs(request, env, country, preUser) {
         try { await conn.writer.write(h.payload); } catch { /* ignore */ }
         addUsage(env, user.uuid, h.payload.length, usage);
       }
+      if (early) addUsage(env, user.uuid, early.length, usage);
       pumpTcpToWs(conn, server);
       return;
     }

@@ -232,6 +232,7 @@ function subsTab() {
       '<td>' + fmtDate(s.expire) + '</td>' +
       '<td><div class="actions">' +
       rowBtn('sub-copy', s.token, 'کپی لینک') +
+      rowBtn('sub-copy-sb', s.token, 'sing-box') +
       rowBtn('sub-del', s.token, 'حذف', true) +
       '</div></td></tr>';
   }).join('');
@@ -257,7 +258,7 @@ function settingsTab() {
     '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">' +
     '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌های دستی: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
     '<p class="muted" style="margin:8px 0">تونل مستقیم: <code>/{uuid}</code> — تونل کشوری: <code>/route/{code}</code> (دستی → کاتالوگ زنده → خروج مستقیم)</p>' +
-    '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code></p></div>';
+    '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code> — قالب sing-box: <code>/sub/{token}?target=singbox</code></p></div>';
 }
 
 async function toggleCatalogRouting() {
@@ -328,6 +329,7 @@ document.addEventListener('click', function (e) {
   if (act === 'loc-del') return delLoc(arg);
   if (act === 'sub-new') return showSubDlg();
   if (act === 'sub-copy') return copySub(arg);
+  if (act === 'sub-copy-sb') return copySub(arg, '?target=singbox');
   if (act === 'sub-del') return delSub(arg);
   if (act === 'save-user') return saveUser(editingUuid);
   if (act === 'save-loc') return saveLoc(editingLoc);
@@ -480,7 +482,7 @@ window.saveSub = async function () {
   } catch (e) { alert('خطا: ' + e.message); }
 };
 
-window.copySub = function (token) { copyText(location.origin + '/sub/' + token); };
+window.copySub = function (token, query) { copyText(location.origin + '/sub/' + token + (query || '')); };
 
 window.delSub = async function (token) {
   if (!confirm('این اشتراک حذف شود؟')) return;

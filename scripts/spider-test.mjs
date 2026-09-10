@@ -168,6 +168,25 @@ let subToken = "";
   check("CDN host + fragment included", decoded.includes("speed.cloudflare.com") && decoded.includes("fragment=tlshello"));
   check("country route paths present", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
 
+  console.log("── subscription: sing-box template ──");
+  {
+    const sb = await req("/sub/" + subToken + "?target=singbox");
+    const body = await sb.text();
+    let cfg = null;
+    try { cfg = JSON.parse(body); } catch { /* keep null */ }
+    check("singbox sub → valid JSON", sb.status === 200 && !!cfg);
+    check("singbox has selector + vless outbounds", !!cfg && Array.isArray(cfg.outbounds) &&
+      cfg.outbounds.some(function (o) { return o.type === "selector" && o.tag === "select"; }) &&
+      cfg.outbounds.some(function (o) { return o.type === "vless" && o.tag.indexOf("alice") === 0; }));
+    check("singbox vless uses ws + 0-RTT early data", !!cfg && cfg.outbounds.some(function (o) {
+      return o.type === "vless" && o.transport && o.transport.type === "ws" &&
+        o.transport.max_early_data === 2048 && o.transport.early_data_header_name === "Sec-WebSocket-Protocol";
+    }));
+    check("singbox has fakeip dns + tun inbound", !!cfg && cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled === true &&
+      Array.isArray(cfg.inbounds) && cfg.inbounds.some(function (i) { return i.type === "tun"; }));
+    check("singbox country route paths present", body.includes("/route/de") && body.includes("/route/tr"));
+  }
+
   const nf = await req("/sub/doesnotexist");
   check("unknown sub token → 404", nf.status === 404);
 }

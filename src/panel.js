@@ -15,7 +15,7 @@
 import {
   UUID_RE, nowSec, randomToken, randomUuid, sha256Hex, timingSafeEq,
   getSetup, saveSetup, getUser, getUserRaw, saveUser, listUsers,
-  getLocations, saveLocations, vlessConfigsForUser, getSettings, saveSettings,
+  getLocations, saveLocations, vlessConfigsForUser, singboxConfigForUsers, getSettings, saveSettings,
 } from "./tunnel.js";
 import { handleCatalog } from "./catalog.js";
 import dashboardJs from "./dashboard.txt";
@@ -65,7 +65,9 @@ async function isAdmin(request, env, url) {
   return (await sessionValid(request, env)) || (await bearerValid(request, env, url));
 }
 
-// ── Subscription (public, base64 of VLESS config list) ───────────────────────
+// ── Subscription (public) ─────────────────────────────────────────────────
+// Default: base64 VLESS link list (v2ray/xray/hiddify). ?target=singbox serves
+// a full sing-box JSON template (selectors + rule-sets + fakeip).
 export async function handleSubscription(request, env, url, token) {
   token = decodeURIComponent(token || "");
   let sub = null;
@@ -76,25 +78,39 @@ export async function handleSubscription(request, env, url, token) {
   if (!host) return new Response("Bad host", { status: 500 });
   const settings = await getSettings(env);
   const domain = host.split(":")[0];
-  const lines = [];
+  const target = (url.searchParams.get("target") || "").toLowerCase();
+  const users = [];
   let used = 0, limit = 0;
   for (const uuid of sub.uuids || []) {
     const u = await getUser(env, uuid);
     if (!u) continue;
-    for (const c of vlessConfigsForUser(u, domain, settings)) lines.push(c);
+    users.push(u);
     used += u.used_bytes || 0;
     if (u.limit_bytes > 0) limit += u.limit_bytes;
+  }
+  const info = {
+    "subscription-userinfo": "upload=0; download=" + used + "; total=" + limit + "; expire=" + (sub.expire || 0),
+    "profile-update-interval": "2",
+  };
+
+  if (target === "singbox") {
+    if (!users.length) return new Response("No active configs", { status: 404 });
+    const cfg = await singboxConfigForUsers(env, users, domain, settings);
+    return new Response(JSON.stringify(cfg, null, 2), {
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...info },
+    });
+  }
+
+  const lines = [];
+  for (const u of users) {
+    for (const c of await vlessConfigsForUser(env, u, domain, settings)) lines.push(c);
   }
   if (!lines.length) return new Response("No active configs", { status: 404 });
   const bytes = new TextEncoder().encode(lines.join("\n"));
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
   return new Response(btoa(bin), {
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "subscription-userinfo": "upload=0; download=" + used + "; total=" + limit + "; expire=" + (sub.expire || 0),
-      "profile-update-interval": "2",
-    },
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...info },
   });
 }
 
@@ -170,7 +186,7 @@ export async function handlePanel(request, env, url) {
     const u = await getUserRaw(env, uuid);
     if (!u) return json({ error: "not found" }, 404);
     const host = (request.headers.get("host") || "").split(":")[0];
-    const configs = vlessConfigsForUser(u, host, await getSettings(env));
+    const configs = await vlessConfigsForUser(env, u, host, await getSettings(env));
     return json({ ok: true, configs });
   }
 
