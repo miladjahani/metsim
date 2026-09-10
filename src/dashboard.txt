@@ -1,0 +1,325 @@
+// SpiderPanel dashboard client script — served inside the panel page.
+// Plain browser JS (no build step); loaded via Wrangler Text import.
+var PANEL = '/spider';
+var users = [], locs = [], subs = [], active = 'users';
+var editingUuid = '', editingLoc = '', currentLinks = [];
+
+function $(id) { return document.getElementById(id); }
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .split('&').join('&amp;')
+    .split('<').join('&lt;')
+    .split('>').join('&gt;')
+    .split('"').join('&quot;')
+    .split("'").join('&#39;');
+}
+
+async function api(path, method, body) {
+  var res = await fetch(PANEL + path, {
+    method: method || 'GET',
+    headers: body ? { 'content-type': 'application/json' } : {},
+    body: body || undefined,
+    credentials: 'same-origin',
+  });
+  var data = await res.json().catch(function () { return {}; });
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+
+function fmtDate(ts) {
+  if (!ts) return '∞';
+  try { return new Date(ts * 1000).toLocaleDateString('fa-IR'); } catch (e) { return String(ts); }
+}
+
+function statePill(u) {
+  if (u.disabled) return '<span class="pill off">غیرفعال</span>';
+  if (u.expire && Math.floor(Date.now() / 1000) > u.expire) return '<span class="pill warn">منقضی</span>';
+  if (u.limit_bytes > 0 && (u.used_bytes || 0) >= u.limit_bytes) return '<span class="pill warn">اتمام حجم</span>';
+  return '<span class="pill ok">فعال</span>';
+}
+
+function linksFor(u) {
+  var host = location.host;
+  var codes = (u.countries && u.countries.length) ? u.countries : [''];
+  return codes.map(function (c) {
+    var p = c ? '/route/' + c : '/' + u.uuid;
+    var name = u.remark + (c ? ' ' + c.toUpperCase() : '');
+    return 'vless://' + u.uuid + '@' + host + ':443?encryption=none&security=tls&sni=' + host +
+      '&host=' + host + '&fp=chrome&type=ws&path=' + encodeURIComponent(p) + '#' + encodeURIComponent(name);
+  });
+}
+
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(function () { alert('کپی شد ✓'); }, function () { fallbackCopy(t); });
+  } else fallbackCopy(t);
+}
+
+function fallbackCopy(t) {
+  var ta = document.createElement('textarea');
+  ta.value = t;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  ta.remove();
+  alert('کپی شد ✓');
+}
+
+function openDlg(h) { var d = $('dlg'); d.innerHTML = h; d.showModal(); }
+function closeDlg() { editingUuid = ''; editingLoc = ''; var d = $('dlg'); if (d.open) d.close(); }
+
+function rowBtn(act, arg, label, danger) {
+  return '<button class="small ' + (danger ? 'danger' : 'ghost') +
+    '" data-act="' + act + '" data-arg="' + escHtml(arg) + '">' + label + '</button>';
+}
+
+function usersTab() {
+  var rows = users.map(function (u) {
+    var cc = (u.countries && u.countries.length)
+      ? u.countries.map(function (c) { return '<span class="pill ok">' + escHtml(c.toUpperCase()) + '</span>'; }).join(' ')
+      : '<span class="muted">پیش‌فرض</span>';
+    return '<tr><td><b>' + escHtml(u.remark) + '</b>' +
+      '<div class="muted ltr" style="font-size:10px">' + u.uuid + '</div></td>' +
+      '<td>' + statePill(u) + '</td>' +
+      '<td class="ltr">' + fmtBytes(u.used_bytes) + ' / ' + (u.limit_bytes > 0 ? fmtBytes(u.limit_bytes) : '∞') + '</td>' +
+      '<td>' + fmtDate(u.expire) + '</td>' +
+      '<td>' + cc + '</td>' +
+      '<td class="ltr">' + (u.concurrent_connections || '∞') + '</td>' +
+      '<td><div class="actions">' +
+      rowBtn('user-edit', u.uuid, 'ویرایش') +
+      rowBtn('user-links', u.uuid, 'لینک‌ها') +
+      rowBtn('user-toggle', u.uuid, u.disabled ? 'فعال‌سازی' : 'غیرفعال') +
+      rowBtn('user-del', u.uuid, 'حذف', true) +
+      '</div></td></tr>';
+  }).join('');
+  if (!rows) rows = '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">هنوز کاربری ساخته نشده است</td></tr>';
+  return '<div class="top"><h2>کاربران</h2><button class="small" data-act="user-new">+ کاربر جدید</button></div>' +
+    '<div class="card tbwrap"><table><thead><tr><th>نام</th><th>وضعیت</th><th>حجم</th><th>انقضا</th><th>کشورها</th><th>اتصال همزمان</th><th>عملیات</th></tr></thead><tbody>' +
+    rows + '</tbody></table></div>';
+}
+
+function locsTab() {
+  var rows = locs.map(function (l) {
+    var ps = [l.proxy].concat(l.proxies || []).filter(Boolean).join(' , ');
+    return '<tr><td><span class="pill ok">' + escHtml(String(l.code).toUpperCase()) + '</span></td>' +
+      '<td>' + escHtml(l.name || '') + '</td>' +
+      '<td class="ltr" style="font-size:11px">' + escHtml(ps) + '</td>' +
+      '<td><div class="actions">' +
+      rowBtn('loc-edit', l.code, 'ویرایش') +
+      rowBtn('loc-del', l.code, 'حذف', true) +
+      '</div></td></tr>';
+  }).join('');
+  if (!rows) rows = '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">لوکیشنی ثبت نشده — اتصال‌ها مستقیم از ورکر خارج می‌شوند</td></tr>';
+  return '<div class="top"><h2>لوکیشن‌ها (کشورها)</h2><button class="small" data-act="loc-new">+ لوکیشن</button></div>' +
+    '<div class="card tbwrap"><table><thead><tr><th>کد</th><th>نام</th><th>پروکسی‌ها</th><th>عملیات</th></tr></thead><tbody>' +
+    rows + '</tbody></table></div>' +
+    '<p class="muted" style="margin-top:10px">فرمت پروکسی: <code>ip:port</code> رله خام، یا <code>socks5://user:pass@ip:port</code> / <code>http://ip:port</code></p>';
+}
+
+function subsTab() {
+  var rows = subs.map(function (s) {
+    return '<tr><td><b>' + escHtml(s.name) + '</b></td>' +
+      '<td class="ltr" style="font-size:11px">' + escHtml(s.token) + '</td>' +
+      '<td>' + ((s.uuids || []).length) + '</td>' +
+      '<td>' + fmtDate(s.expire) + '</td>' +
+      '<td><div class="actions">' +
+      rowBtn('sub-copy', s.token, 'کپی لینک') +
+      rowBtn('sub-del', s.token, 'حذف', true) +
+      '</div></td></tr>';
+  }).join('');
+  if (!rows) rows = '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">اشتراکی ساخته نشده است</td></tr>';
+  return '<div class="top"><h2>اشتراک‌ها</h2><button class="small" data-act="sub-new">+ اشتراک</button></div>' +
+    '<div class="card tbwrap"><table><thead><tr><th>نام</th><th>توکن</th><th>کاربران</th><th>انقضا</th><th>عملیات</th></tr></thead><tbody>' +
+    rows + '</tbody></table></div>';
+}
+
+function setTab() {
+  return '<div class="card"><h2>تنظیمات و اطلاعات</h2>' +
+    '<p class="muted" style="margin:8px 0">دامنه ورکر: <code>' + location.host + '</code></p>' +
+    '<p class="muted" style="margin:8px 0">مسیر پنل: <code>' + PANEL + '</code></p>' +
+    '<p class="muted" style="margin:8px 0">کاربران: <b>' + users.length + '</b> — لوکیشن‌ها: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
+    '<p class="muted" style="margin:8px 0">مسیر تونل VLESS: <code>/{uuid}</code> برای اتصال مستقیم و <code>/route/{code}</code> برای مسیر کشور. پنل و تونل هر دو روی همین ورکر اجرا می‌شوند.</p>' +
+    '<p class="muted" style="margin:8px 0">لینک اشتراک: <code>' + location.origin + '/sub/{token}</code></p></div>';
+}
+
+function render() {
+  var v = $('view');
+  if (active === 'users') v.innerHTML = usersTab();
+  else if (active === 'locs') v.innerHTML = locsTab();
+  else if (active === 'subs') v.innerHTML = subsTab();
+  else v.innerHTML = setTab();
+  var tabs = document.querySelectorAll('.tabs button');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle('ghost', tabs[i].getAttribute('data-arg') !== active);
+  }
+}
+
+async function refresh() {
+  var d = await api('/state');
+  users = d.users || [];
+  locs = d.locations || [];
+  subs = d.subs || [];
+  render();
+}
+
+// One delegated click handler resolves every data-act button (tabs, rows, dialogs).
+document.addEventListener('click', function (e) {
+  var el = e.target;
+  if (!el || !el.getAttribute) return;
+  var act = el.getAttribute('data-act');
+  if (!act) return;
+  var arg = el.getAttribute('data-arg') || '';
+  if (act === 'tab') { active = arg; render(); return; }
+  if (act === 'user-new') return showUserDlg('');
+  if (act === 'user-edit') return showUserDlg(arg);
+  if (act === 'user-links') return showLinks(arg);
+  if (act === 'user-toggle') return toggleUser(arg);
+  if (act === 'user-del') return delUser(arg);
+  if (act === 'loc-new') return showLocDlg('');
+  if (act === 'loc-edit') return showLocDlg(arg);
+  if (act === 'loc-del') return delLoc(arg);
+  if (act === 'sub-new') return showSubDlg();
+  if (act === 'sub-copy') return copySub(arg);
+  if (act === 'sub-del') return delSub(arg);
+  if (act === 'save-user') return saveUser(editingUuid);
+  if (act === 'save-loc') return saveLoc(editingLoc);
+  if (act === 'save-sub') return saveSub();
+  if (act === 'copy-all') return copyText(currentLinks.join('\n'));
+  if (act === 'dlg-close') return closeDlg();
+});
+
+window.showUserDlg = function (uuid) {
+  editingUuid = uuid || '';
+  var u = editingUuid ? users.find(function (x) { return x.uuid === editingUuid; }) : null;
+  var copts = locs.map(function (l) {
+    var sel = (u && u.countries && u.countries.indexOf(l.code) >= 0) ? ' selected' : '';
+    return '<option value="' + escHtml(l.code) + '"' + sel + '>' +
+      escHtml(String(l.code).toUpperCase() + (l.name ? ' — ' + l.name : '')) + '</option>';
+  }).join('');
+  openDlg('<h2>' + (u ? 'ویرایش کاربر' : 'کاربر جدید') + '</h2>' +
+    '<div class="kv"><div><label>نام</label><input id="f-remark" value="' + (u ? escHtml(u.remark) : '') + '"></div>' +
+    '<div><label>UUID (خالی = تصادفی)</label><input id="f-uuid" class="ltr" value="' + (u ? u.uuid : '') + '"' + (u ? ' readonly' : '') + '></div>' +
+    '<div><label>حجم (GB — 0 = بی‌نهایت)</label><input id="f-limit" type="number" min="0" step="0.1" value="' + (u ? (u.limit_bytes / 1073741824) : 0) + '"></div>' +
+    '<div><label>انقضا (روز — 0 = بی‌نهایت)</label><input id="f-expire" type="number" min="0" value="' + (u && u.expire ? Math.ceil((u.expire - Date.now() / 1000) / 86400) : 0) + '"></div>' +
+    '<div><label>حد اتصال همزمان (0 = بی‌نهایت)</label><input id="f-cc" type="number" min="0" value="' + (u ? (u.concurrent_connections || 0) : 0) + '"></div>' +
+    '<div><label>پروکسی اختصاصی (خالی = خودکار)</label><input id="f-proxyip" class="ltr" value="' + (u ? escHtml(u.proxy_ip || '') : '') + '"></div></div>' +
+    '<label>کشورها (خالی = مسیر پیش‌فرض)</label>' +
+    '<select id="f-countries" multiple size="4">' + copts + '</select>' +
+    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-user">ذخیره</button>' +
+    '<button class="small ghost" data-act="dlg-close">انصراف</button></div>');
+};
+
+window.saveUser = async function (uuid) {
+  var body = {
+    remark: $('f-remark').value.trim() || 'user',
+    limit_gb: parseFloat($('f-limit').value) || 0,
+    expire_days: parseInt($('f-expire').value) || 0,
+    concurrent_connections: parseInt($('f-cc').value) || 0,
+    proxy_ip: $('f-proxyip').value.trim(),
+    countries: Array.prototype.map.call($('f-countries').selectedOptions, function (o) { return o.value; }),
+  };
+  if (uuid) body.uuid = uuid;
+  try {
+    await api('/users', 'POST', JSON.stringify(body));
+    closeDlg();
+    await refresh();
+  } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.delUser = async function (uuid) {
+  if (!confirm('این کاربر حذف شود؟')) return;
+  try { await api('/user/' + uuid, 'DELETE'); await refresh(); } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.toggleUser = async function (uuid) {
+  try { await api('/user/' + uuid, 'POST'); await refresh(); } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.showLinks = function (uuid) {
+  var u = users.find(function (x) { return x.uuid === uuid; });
+  if (!u) return;
+  currentLinks = linksFor(u);
+  var body = currentLinks.map(function (l) { return '<div class="cfg ltr">' + escHtml(l) + '</div>'; }).join('');
+  openDlg('<h2>لینک‌های اتصال — ' + escHtml(u.remark) + '</h2>' +
+    '<p class="muted">در کلاینت VLESS (v2rayNG، Streisand، Hiddify، Nekobox و…) ایمپورت کنید:</p>' +
+    '<div style="margin-top:10px">' + body + '</div>' +
+    '<div class="actions" style="margin-top:10px"><button class="small" data-act="copy-all">کپی همه</button>' +
+    '<button class="small ghost" data-act="dlg-close">بستن</button></div>');
+};
+
+window.showLocDlg = function (code) {
+  editingLoc = code || '';
+  var l = editingLoc ? locs.find(function (x) { return x.code === editingLoc; }) : null;
+  openDlg('<h2>' + (l ? 'ویرایش لوکیشن' : 'لوکیشن جدید') + '</h2>' +
+    '<div class="kv"><div><label>کد کشور (مثل de، tr، us)</label><input id="l-code" class="ltr" value="' + (l ? escHtml(l.code) : '') + '"' + (l ? ' readonly' : '') + '></div>' +
+    '<div><label>نام نمایشی</label><input id="l-name" value="' + (l ? escHtml(l.name || '') : '') + '"></div></div>' +
+    '<label>پروکسی‌ها (هر خط یک آیتم)</label>' +
+    '<textarea id="l-proxies" class="ltr" rows="5">' + (l ? escHtml([l.proxy].concat(l.proxies || []).filter(Boolean).join('\n')) : '') + '</textarea>' +
+    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-loc">ذخیره</button>' +
+    '<button class="small ghost" data-act="dlg-close">انصراف</button></div>');
+};
+
+window.saveLoc = async function (code) {
+  var body = {
+    code: ($('l-code').value.trim() || code || '').toLowerCase(),
+    name: $('l-name').value.trim(),
+    proxies: $('l-proxies').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean),
+  };
+  if (!body.code) { alert('کد کشور لازم است'); return; }
+  try {
+    await api('/locations', 'POST', JSON.stringify(body));
+    closeDlg();
+    await refresh();
+  } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.delLoc = async function (code) {
+  if (!confirm('این لوکیشن حذف شود؟')) return;
+  try { await api('/locations/' + encodeURIComponent(code), 'DELETE'); await refresh(); } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.showSubDlg = function () {
+  var opts = users.map(function (u) {
+    return '<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" class="sub-uuid" value="' +
+      u.uuid + '" style="width:auto"> ' + escHtml(u.remark) + '</label>';
+  }).join('') || '<p class="muted">اول کاربر بسازید</p>';
+  openDlg('<h2>اشتراک جدید</h2>' +
+    '<div class="kv"><div><label>نام</label><input id="s-name"></div>' +
+    '<div><label>انقضا (روز — 0 = بی‌نهایت)</label><input id="s-expire" type="number" min="0" value="0"></div></div>' +
+    '<label>کاربران</label>' +
+    '<div style="max-height:180px;overflow:auto">' + opts + '</div>' +
+    '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-sub">ذخیره</button>' +
+    '<button class="small ghost" data-act="dlg-close">انصراف</button></div>');
+};
+
+window.saveSub = async function () {
+  var uuids = Array.prototype.map.call(document.querySelectorAll('.sub-uuid:checked'), function (c) { return c.value; });
+  if (!uuids.length) { alert('حداقل یک کاربر انتخاب کنید'); return; }
+  var body = { name: $('s-name').value.trim() || 'sub', uuids: uuids, expire_days: parseInt($('s-expire').value) || 0 };
+  try {
+    var r = await api('/subs', 'POST', JSON.stringify(body));
+    closeDlg();
+    await refresh();
+    copySub(r.sub.token);
+  } catch (e) { alert('خطا: ' + e.message); }
+};
+
+window.copySub = function (token) { copyText(location.origin + '/sub/' + token); };
+
+window.delSub = async function (token) {
+  if (!confirm('این اشتراک حذف شود؟')) return;
+  try { await api('/subs/' + encodeURIComponent(token), 'DELETE'); await refresh(); } catch (e) { alert('خطا: ' + e.message); }
+};
+
+refresh().catch(function (e) {
+  $('view').innerHTML = '<div class="msg err">خطا در بارگذاری: ' + escHtml(e.message) + '</div>';
+});

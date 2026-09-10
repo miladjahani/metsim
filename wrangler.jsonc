@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "spiderpanel",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "rules": [
+    { "type": "Text", "globs": ["**/*.txt"], "fallthrough": true }
+  ],
+  "kv_namespaces": [
+    { "binding": "SPIDER_KV", "id": "SPIDER_KV_PLACEHOLDER" }
+  ],
+  "observability": { "enabled": true }
+}
