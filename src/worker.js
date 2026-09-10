@@ -30,6 +30,11 @@ export default {
       return new Response("SpiderPanel online", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
+    // ── Root: send visitors to the panel ──
+    if (path === "/") {
+      return new Response(null, { status: 302, headers: { location: PANEL_PATH } });
+    }
+
     // ── Subscription ──
     if (first === "sub" && seg[1]) {
       return handleSubscription(request, env, url, seg[1]);
