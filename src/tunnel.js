@@ -212,8 +212,25 @@ export async function saveLocations(env, locs) {
 // assumed to be reachable: the panel latency test is the source of truth.
 // outboundMode controls the server-side country relay; direct-first is the
 // default so a normal VLESS node never applies a proxy unnecessarily.
-// ech/alpn: opt-in client TLS hints for clients that support them.
+// ech/alpn: opt-in client TLS hints for clients that support them. Like cfnew,
+// ECH defaults to OFF — enabling it can break strict TLS middleboxes.
 const PORT_DEFAULTS = [443];
+// cfnew's default preferred Cloudflare edge pool. These are direct edge
+// addresses, not outbound relays: the client connects to the IP while TLS
+// SNI/Host stays set to the Worker domain. A node is emitted only after the
+// address passes the same live TCP probe used by the panel.
+const DEFAULT_EDGE_IPS = [
+  "172.71.218.190",
+  "162.158.228.87",
+  "162.158.189.134",
+  "162.158.26.63",
+  "162.158.25.86",
+  "162.158.29.216",
+  "162.158.218.160",
+  "162.158.227.214",
+  "172.69.118.198",
+  "172.69.119.150",
+];
 const ALPN_VALUES = new Set(["h3", "h2", "http/1.1"]);
 
 function normalizeSettings(s) {
@@ -223,16 +240,16 @@ function normalizeSettings(s) {
     : PORT_DEFAULTS.slice();
   const cleanIps = Array.isArray(s.cleanIps)
     ? s.cleanIps.map((x) => String(x).trim()).filter(Boolean).slice(0, 40)
-    : [];
+    : DEFAULT_EDGE_IPS.slice();
   const alpn = Array.isArray(s.alpn)
     ? s.alpn.map((x) => String(x).trim()).filter((x) => ALPN_VALUES.has(x)).slice(0, 3)
     : [];
   return {
     catalogRouting: s.catalogRouting !== false,
-    cleanIps,
+    cleanIps: cleanIps.length ? cleanIps : DEFAULT_EDGE_IPS.slice(),
     ports: ports.length ? ports : PORT_DEFAULTS.slice(),
     outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(s.outboundMode) ? s.outboundMode : "direct-first",
-    ech: s.ech !== false,
+    ech: s.ech === true,
     echQueryDomain: String(s.echQueryDomain || "cloudflare-ech.com").trim() || "cloudflare-ech.com",
     alpn,
   };
@@ -628,16 +645,19 @@ export async function nodesForUser(env, u, domain, settings) {
   const s = normalizeSettings(settings);
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
   const nodes = [];
+  const liveCleanIps = await rankProxyEntries(env, "clean", s.cleanIps, null);
+  const edgeEntries = liveCleanIps.length ? liveCleanIps : s.cleanIps;
   for (const code of countries) {
     const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/";
     const label = (u.remark || "user") + (code ? "-" + String(code).toUpperCase() : "");
-    const ports = s.ports.slice(0, 2);
-    for (const port of ports) {
+    for (const rawIp of edgeEntries.slice(0, 6)) {
+      const endpoint = parseEndpoint(rawIp, 443);
+      if (!endpoint) continue;
       nodes.push({
-        tag: label + "-direct:" + port,
+        tag: label + "-" + endpoint.host + ":" + endpoint.port,
         uuid: u.uuid,
-        address: domain,
-        port,
+        address: endpoint.host,
+        port: endpoint.port,
         host: domain,
         path,
         earlyData: 2048,
@@ -645,31 +665,15 @@ export async function nodesForUser(env, u, domain, settings) {
       });
     }
   }
-  // Clean IPs are admitted only after a live TCP probe. The 20-minute health
-  // cache is shared with the location health endpoint, so generated nodes and
-  // the panel show the same source of truth.
-  const liveCleanIps = await rankProxyEntries(env, "clean", s.cleanIps, null);
-  for (const rawIp of liveCleanIps) {
-    const endpoint = parseEndpoint(rawIp, 443);
-    if (!endpoint) continue;
-    nodes.push({
-      tag: "CleanIP-" + endpoint.host + ":" + endpoint.port,
-      uuid: u.uuid,
-      address: endpoint.host,
-      port: endpoint.port,
-      host: domain,
-      path: "/",
-      earlyData: 2048,
-      country: "",
-    });
-  }
   return nodes.slice(0, CONFIG_CAP);
 }
 
 function vlessLink(node, settings) {
   const s = normalizeSettings(settings);
+  // Same parameter shape as cfnew links: security=tls, type=ws, fp=chrome,
+  // path with 0-RTT via the Sec-WebSocket-Protocol header.
   const q = "encryption=none&security=tls&sni=" + encodeURIComponent(node.host) +
-    "&host=" + encodeURIComponent(node.host) + "&fp=randomized&type=ws&path=" +
+    "&host=" + encodeURIComponent(node.host) + "&fp=chrome&type=ws&path=" +
     encodeURIComponent(node.path) + "&ed=" + node.earlyData + "&eh=Sec-WebSocket-Protocol" +
     (s.alpn.length ? "&alpn=" + encodeURIComponent(s.alpn.join(",")) : "") +
     (s.ech ? "&ech=1" : "");
@@ -783,7 +787,7 @@ function singboxOutbound(node) {
       enabled: true,
       server_name: node.host,
       insecure: false,
-      utls: { enabled: true, fingerprint: "randomized" },
+      utls: { enabled: true, fingerprint: "chrome" },
       ...(normalizeSettings(node.settings || {}).alpn.length ? { alpn: normalizeSettings(node.settings).alpn } : {}),
       ...(normalizeSettings(node.settings || {}).ech ? { ech: { enabled: true } } : {}),
     },
