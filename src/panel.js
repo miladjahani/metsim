@@ -16,9 +16,9 @@ import {
   UUID_RE, nowSec, randomToken, randomUuid, sha256Hex, timingSafeEq,
   getSetup, saveSetup, getUser, getUserRaw, saveUser, listUsers,
   getLocations, saveLocations, vlessConfigsForUser, singboxConfigForUsers, clashConfigForUsers, getSettings, saveSettings,
-  parseEndpoint, probeTcpEndpoint,
+  parseEndpoint, probeTcpEndpoint, getCountryHealth,
 } from "./tunnel.js";
-import { handleCatalog } from "./catalog.js";
+import { handleCatalog, getCatalogCountryProxies } from "./catalog.js";
 import dashboardJs from "./dashboard.txt";
 
 export const PANEL_PATH = "/spider";
@@ -183,16 +183,25 @@ export async function handlePanel(request, env, url) {
     const cur = await getSettings(env);
     const next = {
       catalogRouting: typeof b.catalogRouting === "boolean" ? b.catalogRouting : cur.catalogRouting,
-      cdnHosts: Array.isArray(b.cdnHosts) ? b.cdnHosts.map((x) => String(x).trim()).filter(Boolean) : cur.cdnHosts,
       cleanIps: Array.isArray(b.cleanIps) ? b.cleanIps.map((x) => String(x).trim()).filter(Boolean) : cur.cleanIps,
       ports: Array.isArray(b.ports) ? b.ports.map(Number).filter((p) => p > 0 && p < 65536) : cur.ports,
-      fragment: typeof b.fragment === "boolean" ? b.fragment : cur.fragment,
       outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(b.outboundMode) ? b.outboundMode : cur.outboundMode,
       ech: typeof b.ech === "boolean" ? b.ech : cur.ech,
       alpn: Array.isArray(b.alpn) ? b.alpn : cur.alpn,
     };
     await saveSettings(env, next);
     return json({ ok: true, settings: await getSettings(env) });
+  }
+
+  if (sub === "/location-health" && method === "GET") {
+    const code = String(url.searchParams.get("code") || "").toLowerCase().trim();
+    if (!code) return json({ error: "code required" }, 400);
+    const loc = (await getLocations(env)).find((l) => String(l.code || "").toLowerCase() === code) || { code, proxies: [] };
+    const manual = [loc.proxy].concat(loc.proxies || []).filter(Boolean);
+    const catalog = manual.length ? [] : (await getCatalogCountryProxies(env, code)).map((p) => p.entry);
+    const entries = [...new Set(manual.concat(catalog))];
+    const results = await getCountryHealth(env, code, entries, loc);
+    return json({ ok: true, code, results });
   }
 
   if (sub === "/latency" && method === "POST") {

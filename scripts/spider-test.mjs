@@ -80,10 +80,10 @@ console.log("── settings + latency ──");
   const st0 = await s0.json();
   check("settings defaults are present", s0.status === 200 && st0.settings.catalogRouting === true && Array.isArray(st0.settings.cleanIps));
   const saved = await req("/spider/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-    catalogRouting: true, cleanIps: ["1.1.1.1:443", "8.8.8.8"], outboundMode: "proxy-only", ech: true, alpn: ["h2"], fragment: false,
+    catalogRouting: true, cleanIps: ["1.1.1.1:443", "8.8.8.8"], outboundMode: "proxy-only", ech: true, alpn: ["h2"], fragment: true,
   }) });
   const sj = await saved.json();
-  check("advanced settings normalized", saved.status === 200 && sj.settings.cleanIps[0] === "1.1.1.1:443" && sj.settings.outboundMode === "proxy-only" && sj.settings.ech === true && sj.settings.alpn[0] === "h2" && sj.settings.fragment === false);
+  check("advanced settings normalized", saved.status === 200 && sj.settings.cleanIps[0] === "1.1.1.1:443" && sj.settings.outboundMode === "proxy-only" && sj.settings.ech === true && sj.settings.alpn[0] === "h2" && !Object.prototype.hasOwnProperty.call(sj.settings, "fragment"));
   const latency = await req("/spider/latency", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ targets: ["1.1.1.1:443", "bad target"] }) });
   const ljson = await latency.json();
   check("latency endpoint returns bounded results", latency.status === 200 && ljson.ok && ljson.results.length === 2);
@@ -101,7 +101,7 @@ let subToken = "";
   const body = await pub.text();
   const decoded = Buffer.from(body, "base64").toString("utf8");
   check("VLESS subscription is base64", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
-  check("custom clean IP + advanced link options", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("ech=1") && !decoded.includes("fragment=tlshello"));
+  check("custom clean IP + direct link options", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("ech=1") && decoded.includes("&ed=2048") && decoded.includes("&eh=Sec-WebSocket-Protocol") && !decoded.includes("fragment=") && !decoded.includes("cdn"));
   check("country routes remain multi-location", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
 
   const sb = await req("/sub/" + subToken + "?target=singbox");

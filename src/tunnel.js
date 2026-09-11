@@ -207,47 +207,33 @@ export async function saveLocations(env, locs) {
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 // catalogRouting: catalog countries act as locations automatically (default on).
-// cdnHosts: extra TLS fronting hosts mixed into every user's subscription.
-// cleanIps: operator-tested Cloudflare edge IPs; these are only client-facing
+// cleanIps: operator-tested Cloudflare edge IPs. They are only client-facing
 // addresses and always keep the Worker hostname as SNI/Host. They are never
 // assumed to be reachable: the panel latency test is the source of truth.
-// outboundMode: proxy-first (legacy behavior), direct-first, or proxy-only.
+// outboundMode controls the server-side country relay; direct-first is the
+// default so a normal VLESS node never applies a proxy unnecessarily.
 // ech/alpn: opt-in client TLS hints for clients that support them.
-const CDN_DEFAULTS = ["speed.cloudflare.com", "icook.hk", "time.is", "cf.090227.xyz", "ip.sb"];
-const PORT_DEFAULTS = [443, 2053, 2083];
-const CLEAN_IP_DEFAULTS = [
-  "131.0.75.219", "141.101.75.29", "103.31.7.68", "103.22.200.13",
-  "190.93.247.3", "173.245.58.131", "104.25.185.250", "197.234.241.21",
-  "172.67.179.36", "172.64.24.33", "103.31.4.252", "198.41.211.232",
-  "173.245.62.204", "172.67.194.200", "188.114.99.255", "172.64.140.35",
-  "162.158.27.7", "198.41.132.22", "197.234.243.16", "108.162.239.41",
-];
+const PORT_DEFAULTS = [443];
 const ALPN_VALUES = new Set(["h3", "h2", "http/1.1"]);
 
 function normalizeSettings(s) {
   s = s && typeof s === "object" ? s : {};
-  const cdn = Array.isArray(s.cdnHosts)
-    ? s.cdnHosts.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
-    : CDN_DEFAULTS;
   const ports = Array.isArray(s.ports)
     ? s.ports.map(Number).filter((p) => p > 0 && p < 65536).slice(0, 6)
     : PORT_DEFAULTS.slice();
   const cleanIps = Array.isArray(s.cleanIps)
     ? s.cleanIps.map((x) => String(x).trim()).filter(Boolean).slice(0, 40)
-    : CLEAN_IP_DEFAULTS;
+    : [];
   const alpn = Array.isArray(s.alpn)
     ? s.alpn.map((x) => String(x).trim()).filter((x) => ALPN_VALUES.has(x)).slice(0, 3)
     : [];
-  const outboundMode = ["proxy-first", "direct-first", "proxy-only"].includes(s.outboundMode)
-    ? s.outboundMode : "proxy-first";
   return {
     catalogRouting: s.catalogRouting !== false,
-    cdnHosts: cdn.length ? cdn : CDN_DEFAULTS,
-    cleanIps: cleanIps.length ? cleanIps : CLEAN_IP_DEFAULTS,
-    ports: ports.length ? ports : [443],
-    fragment: s.fragment !== false,
-    outboundMode,
-    ech: s.ech === true,
+    cleanIps,
+    ports: ports.length ? ports : PORT_DEFAULTS.slice(),
+    outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(s.outboundMode) ? s.outboundMode : "direct-first",
+    ech: s.ech !== false,
+    echQueryDomain: String(s.echQueryDomain || "cloudflare-ech.com").trim() || "cloudflare-ech.com",
     alpn,
   };
 }
@@ -477,7 +463,9 @@ async function connectViaProxy(proxyEntry, targetHost, targetPort, loc) {
 
 // ── Fastest-proxy balancer ───────────────────────────────────────────────────
 const PROBE_TIMEOUT_MS = 4000;
-const PROBE_TTL_MS = 120000;
+const PROBE_TTL_MS = 1200000; // refresh the live pool every 20 minutes
+const HEALTH_TTL_SEC = 1200;
+const HEALTH_PROBE_MAX = 20;
 const FASTEST_CACHE = Object.create(null); // country code → { order, at }
 
 async function probeProxyLatency(entry, loc) {
@@ -502,25 +490,68 @@ async function probeProxyLatency(entry, loc) {
   }
 }
 
-async function rankCountryProxies(loc) {
-  const list = countryProxyList(loc);
-  if (!loc || list.length <= 1) return list;
-  const key = String(loc.code || loc.country || "x").toLowerCase();
+async function rankProxyEntries(env, country, entries, loc) {
+  const list = [...new Set((entries || []).map((e) => String(e || "").trim()).filter(Boolean))];
+  if (!list.length) return [];
+  const key = String(country || "x").toLowerCase();
   const cached = FASTEST_CACHE[key];
   if (cached && Date.now() - cached.at < PROBE_TTL_MS) {
-    const alive = cached.order.filter((e) => list.includes(e));
-    for (const p of list) if (!alive.includes(p)) alive.push(p);
-    return alive;
+    return cached.order.filter((entry) => list.includes(entry));
   }
-  // Probe at most PROBE_MAX entries per country per cache window — racing
-  // hundreds of sockets would blow the request budget on big lists.
-  const head = list.slice(0, PROBE_MAX);
-  const tail = list.slice(PROBE_MAX);
-  const results = await Promise.all(head.map(async (e) => ({ e, ms: await probeProxyLatency(e, loc) })));
-  results.sort((a, b) => (a.ms < 0 ? 1 : b.ms < 0 ? -1 : a.ms - b.ms));
-  const order = results.map((r) => r.e).concat(tail);
-  FASTEST_CACHE[key] = { order, at: Date.now() };
+  try {
+    const raw = await env.SPIDER_KV.get("health:" + key);
+    const stored = raw ? JSON.parse(raw) : null;
+    if (stored && stored.at && Date.now() - stored.at < PROBE_TTL_MS) {
+      const order = (stored.results || []).filter((r) => r && r.ok).sort((a, b) => a.ms - b.ms).map((r) => r.entry);
+      FASTEST_CACHE[key] = { order, at: stored.at };
+      return order.filter((entry) => list.includes(entry));
+    }
+  } catch { /* health cache is best effort */ }
+
+  // Only publish entries that passed a real TCP connect. The list is capped to
+  // keep a cold Worker within its subrequest budget. Rotate the probe window
+  // every 20 minutes so a large catalog is not permanently stuck on its first
+  // rows.
+  const window = Math.floor(Date.now() / PROBE_TTL_MS);
+  const start = list.length ? (window * HEALTH_PROBE_MAX) % list.length : 0;
+  const head = list.slice(start, start + HEALTH_PROBE_MAX).concat(
+    start + HEALTH_PROBE_MAX > list.length ? list.slice(0, (start + HEALTH_PROBE_MAX) % list.length) : []
+  );
+  const results = await Promise.all(head.map(async (entry) => {
+    const ms = await probeProxyLatency(entry, loc);
+    return { entry, ms, ok: ms >= 0 };
+  }));
+  const order = results.filter((r) => r.ok).sort((a, b) => a.ms - b.ms).map((r) => r.entry);
+  const at = Date.now();
+  FASTEST_CACHE[key] = { order, at };
+  try {
+    await env.SPIDER_KV.put("health:" + key, JSON.stringify({ at, results }), { expirationTtl: HEALTH_TTL_SEC * 2 });
+  } catch { /* health cache is best effort */ }
   return order;
+}
+
+export async function getCountryHealth(env, country, entries, loc) {
+  const list = [...new Set((entries || []).map((e) => String(e || "").trim()).filter(Boolean))];
+  const key = String(country || "x").toLowerCase();
+  let results = null;
+  try {
+    const raw = await env.SPIDER_KV.get("health:" + key);
+    const stored = raw ? JSON.parse(raw) : null;
+    if (stored && stored.at && Date.now() - stored.at < PROBE_TTL_MS) results = stored.results || [];
+  } catch { /* fall through to a live probe */ }
+  if (!results) {
+    await rankProxyEntries(env, country, list, loc);
+    try {
+      const raw = await env.SPIDER_KV.get("health:" + key);
+      const stored = raw ? JSON.parse(raw) : null;
+      results = stored && stored.results ? stored.results : [];
+    } catch { results = []; }
+  }
+  return results.filter((r) => list.includes(r.entry)).sort((a, b) => (a.ok !== b.ok ? (a.ok ? -1 : 1) : a.ms - b.ms));
+}
+
+async function rankCountryProxies(env, loc) {
+  return rankProxyEntries(env, loc && (loc.code || loc.country), countryProxyList(loc), loc);
 }
 
 // Resolve the outbound connection for a tunnel session.
@@ -537,12 +568,12 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
   let loc = null;
   if (country) {
     loc = (await getLocations(env)).find((x) => String(x.code || "").toLowerCase() === String(country).toLowerCase()) || null;
-    candidates = await rankCountryProxies(loc);
+    candidates = await rankCountryProxies(env, loc);
     if (settings.catalogRouting) {
       const catProxies = await getCatalogCountryProxies(env, country);
-      for (const p of catProxies) {
-        if (!candidates.includes(p.entry)) candidates.push(p.entry);
-      }
+      const catalogEntries = catProxies.map((p) => p.entry);
+      const allEntries = [...new Set(countryProxyList(loc).concat(catalogEntries))];
+      candidates = await rankProxyEntries(env, country, allEntries, loc);
     }
     if (!candidates.length && settings.outboundMode === "proxy-only") return null;
   } else {
@@ -555,7 +586,10 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
     if (target && target !== String(workerHost || "").toLowerCase()) return openSocket(target, targetPort);
     return null;
   };
-  if (settings.outboundMode === "direct-first") {
+  // A normal / VLESS node is direct by default. An explicit /route/{country}
+  // node must still honor its country, so it never skips the selected relay
+  // merely because the global mode is direct-first.
+  if (!country && settings.outboundMode === "direct-first") {
     const first = await direct();
     if (first) return first;
   }
@@ -569,7 +603,7 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
   // never blocks (catalog rows below are already tried in the loop above).
   if (country && loc) {
     delete FASTEST_CACHE[String(loc.code || loc.country || "x").toLowerCase()];
-    const fresh = await rankCountryProxies(loc);
+    const fresh = await rankProxyEntries(env, country, countryProxyList(loc), loc);
     const rest = fresh.filter((e) => !candidates.slice(0, tried).includes(e));
     for (const entry of rest) {
       if (tried >= TRY_MAX * 2) break;
@@ -586,37 +620,36 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
 }
 
 // ── Config generation ────────────────────────────────────────────────────
-// Server-side generation: worker domain + CDN/clean-IP hosts × TLS ports ×
-// user countries (+ the direct path). End users just refresh their sub link —
-// proxy/CDN/port changes flow into the configs automatically.
+// Server-side generation: the Worker hostname + validated clean IPs × TLS
+// ports × user countries. There is intentionally no CDN fronting or fragment
+// option: each generated node is a normal direct VLESS-over-WS endpoint.
 const CONFIG_CAP = 200;
 export async function nodesForUser(env, u, domain, settings) {
   const s = normalizeSettings(settings);
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
-  const hosts = [domain].concat(s.cdnHosts).slice(0, 3);
   const nodes = [];
   for (const code of countries) {
-    const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/" + u.uuid;
+    const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/";
     const label = (u.remark || "user") + (code ? "-" + String(code).toUpperCase() : "");
     const ports = s.ports.slice(0, 2);
-    for (const host of hosts) {
-      for (const port of ports) {
-        nodes.push({
-          tag: label + "-" + (host === domain ? "work" : "cdn") + ":" + port,
-          uuid: u.uuid,
-          address: host,
-          port,
-          host,
-          path,
-          earlyData: 2048,
-          country: code || "",
-        });
-      }
+    for (const port of ports) {
+      nodes.push({
+        tag: label + "-direct:" + port,
+        uuid: u.uuid,
+        address: domain,
+        port,
+        host: domain,
+        path,
+        earlyData: 2048,
+        country: code || "",
+      });
     }
   }
-  // 20 clean IPs (client → CF edge on IP, SNI/Host = worker domain) so DPI
-  // blocks of the workers.dev hostname don't take the whole sub down.
-  for (const rawIp of s.cleanIps) {
+  // Clean IPs are admitted only after a live TCP probe. The 20-minute health
+  // cache is shared with the location health endpoint, so generated nodes and
+  // the panel show the same source of truth.
+  const liveCleanIps = await rankProxyEntries(env, "clean", s.cleanIps, null);
+  for (const rawIp of liveCleanIps) {
     const endpoint = parseEndpoint(rawIp, 443);
     if (!endpoint) continue;
     nodes.push({
@@ -625,7 +658,7 @@ export async function nodesForUser(env, u, domain, settings) {
       address: endpoint.host,
       port: endpoint.port,
       host: domain,
-      path: "/" + u.uuid,
+      path: "/",
       earlyData: 2048,
       country: "",
     });
@@ -637,10 +670,9 @@ function vlessLink(node, settings) {
   const s = normalizeSettings(settings);
   const q = "encryption=none&security=tls&sni=" + encodeURIComponent(node.host) +
     "&host=" + encodeURIComponent(node.host) + "&fp=randomized&type=ws&path=" +
-    encodeURIComponent(node.path + "?ed=" + node.earlyData) +
+    encodeURIComponent(node.path) + "&ed=" + node.earlyData + "&eh=Sec-WebSocket-Protocol" +
     (s.alpn.length ? "&alpn=" + encodeURIComponent(s.alpn.join(",")) : "") +
-    (s.ech ? "&ech=1" : "") +
-    (s.fragment ? "&fragment=tlshello,100-200,10-20" : "");
+    (s.ech ? "&ech=1" : "");
   return "vless://" + node.uuid + "@" + node.address + ":" + node.port + "?" + q +
     "#" + encodeURIComponent(node.tag);
 }
@@ -701,7 +733,7 @@ export async function clashConfigForUsers(env, users, domain, settings) {
       servername: node.host,
       network: "ws",
       "ws-opts": {
-        path: node.path + "?ed=" + node.earlyData,
+        path: node.path,
         headers: { Host: node.host },
         "max-early-data": node.earlyData,
         "early-data-header-name": "Sec-WebSocket-Protocol",
@@ -757,7 +789,7 @@ function singboxOutbound(node) {
     },
     transport: {
       type: "ws",
-      path: node.path + "?ed=" + node.earlyData,
+      path: node.path,
       headers: { Host: node.host },
       max_early_data: node.earlyData,
       early_data_header_name: "Sec-WebSocket-Protocol",

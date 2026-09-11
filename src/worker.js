@@ -30,8 +30,10 @@ export default {
       return new Response("SpiderPanel online", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
-    // ── Root: send visitors to the panel ──
+    // ── Root: direct VLESS WS uses the same canonical "/" path as the
+    // generated configs; ordinary browser visits still go to the panel.
     if (path === "/") {
+      if (request.headers.get("Upgrade") === "websocket") return handleVlessWs(request, env, "", null);
       return new Response(null, { status: 302, headers: { location: PANEL_PATH } });
     }
 

@@ -16,16 +16,16 @@
 
 - 🧑‍💼 **پنل مدیریت فارسی** روی مسیر `/spider` — تم مدرن با کارت‌های آمار، کاتالوگ کشورها، toast و پشتیبانی کامل از موبایل
 - 👥 **مدیریت کاربران**: حجم مصرفی، تاریخ انقضا، حد اتصال همزمان (محدودیت IP)، فعال/غیرفعال‌سازی
-- 🌍 **مسیریابی کشوری**: هر کاربر می‌تواند از چند لوکیشن (کد کشور) عبور کند — `/route/{code}`
+- 🌍 **مسیریابی کشوری**: هر کاربر می‌تواند از چند لوکیشن (کد کشور) عبور کند — `/route/{code}`؛ خروجی پیش‌فرض برای نودهای عادی مستقیم است و فقط مسیر کشوری انتخاب‌شده از پروکسی استفاده می‌کند
 - 📡 **کاتالوگ زنده = لوکیشن خودکار**: اتصال مستقیم به [EDT-Pages/Proxy-List](https://github.com/EDT-Pages/Proxy-List) — هر کشوری در کاتالوگ، خودش یک لوکیشن قابل مسیریابی است؛ تونل `/route/{code}` اول پروکسی‌های دستی، بعد پروکسی‌های زنده کاتالوگ (socks5 → https → http) و در نهایت خروج مستقیم را امتحان می‌کند (کش ۱۰ دقیقه‌ای در KV، قابل خاموش‌کردن از تنظیمات)
 - 🔐 **پروکسی TLS خروجی**: پشتیبانی از `https://ip:port` (اتصال رمزنگاری‌شده به پروکسی)
-- ⚡ **انتخاب سریع‌ترین پروکسی**: در هر لوکیشن، همه پروکسی‌ها با هم مسابقه تأخیر TCP می‌دهند و سریع‌ترین برنده می‌شود (با کش ۲ دقیقه‌ای)
+- ⚡ **انتخاب سریع‌ترین پروکسی زنده**: قبل از استفاده، پروکسی‌های هر کشور با TCP بررسی می‌شوند؛ فقط موارد موفق وارد pool می‌شوند و pool هر ۲۰ دقیقه با پنجره‌ی بعدی منبع تازه می‌شود (نتایج در KV cache می‌شوند)
 - 🔗 **پروتکل‌های پروکسی خروجی**: رله خام `ip:port`، `socks5://`، `http://`
 - 📱 **اشتراک‌گذاری**: لینک سابسکریپشن عمومی `/sub/{token}` برای ایمپورت در v2rayNG، Streisand، Hiddify، Nekobox و…
 - 📦 **قالب‌های آماده چندکلاینتی**: `/sub/{token}?target=singbox` برای sing-box و `/sub/{token}?target=clash` برای Clash/Mihomo؛ User-Agent کلاینت‌های sing-box و Clash نیز خودکار تشخیص داده می‌شود
 - 🧪 **تست تأخیر داخلی**: تب «تست IP» در پنل، تست TCP تا ۵۰ هدف و ذخیره‌ی نتایج موفق به‌عنوان Clean IP
-- ⚙️ **تنظیمات پیشرفته‌ی قابل تغییر در KV**: Clean IP و پورت‌ها، حالت خروجی `proxy-first` / `direct-first` / `proxy-only`، ECH، ALPN و کش ۳۰ ثانیه‌ای تنظیمات
-- 📦 **قالب sing-box**: `/sub/{token}?target=singbox` — فول کانفیگ آماده با سلکتور سرویس‌ها، rule-setهای سایت‌ها، fakeip DNS، اینباند tun + mixed و گروه urltest خودکار برای هر کشور (۰-RTT WebSocket early-data + uTLS random از قبل فعال است)
+- ⚙️ **تنظیمات اتصال**: فقط Clean IPهای تأییدشده و پورت‌ها؛ CDN و Fragment عمداً حذف شده‌اند. حالت خروجی `direct-first` (پیش‌فرض) / `proxy-first` / `proxy-only`، ECH و ALPN در KV نگهداری می‌شوند
+- 📦 **قالب sing-box**: `/sub/{token}?target=singbox` — فول کانفیگ آماده با سلکتور سرویس‌ها، rule-setهای سایت‌ها، fakeip DNS، اینباند tun + mixed و گروه urltest خودکار برای هر کشور؛ ساختار VLESS شامل `path=/`، `ed=2048` و `Sec-WebSocket-Protocol` است
 - 🔐 **احراز هویت**: اولین لاگین، توکن مدیر را ثبت می‌کند (یا متغیر `SPIDER_TOKEN`)؛ نشست با کوکی HttpOnly به مدت ۲۴ ساعت
 - 🚫 **ضد حلقه**: اتصال به خود ورکر هرگز به داخل تونل برنمی‌گردد
 - 📊 **حساب‌داری ترافیک**: شمارش مصرف با نوشتن دسته‌ای در KV (هر ~۱ مگابایت)
@@ -94,7 +94,7 @@ npx wrangler dev
 | مسیر اشتراک | `/sub/{token}` |
 | اشتراک قالب sing-box | `/sub/{token}?target=singbox` |
 | اشتراک قالب Clash/Mihomo | `/sub/{token}?target=clash` |
-| تست تأخیر مدیریتی | `POST /spider/latency` (حداکثر ۵۰ هدف) |
+| تست تأخیر مدیریتی | `POST /spider/latency` (حداکثر ۵۰ هدف)؛ سلامت کشور نیز از `GET /spider/location-health?code=DE` قابل مشاهده است |
 | کاتالوگ پروکسی | `/spider/catalog` (اختیاری: `?country=DE&proto=socks5&refresh=1`) |
 | تونل مستقیم | `/{uuid}` |
 | تونل کشوری | `/route/{code}` |
@@ -105,7 +105,7 @@ npx wrangler dev
 ## 🔗 ساختار لینک اتصال (VLESS)
 
 ```
-vless://{uuid}@{worker-domain}:443?encryption=none&security=tls&sni={worker-domain}&host={worker-domain}&fp=chrome&type=ws&path=/{uuid یا /route/{code}}#{نام کاربر}
+vless://{uuid}@{worker-domain}:443?encryption=none&security=tls&sni={worker-domain}&host={worker-domain}&fp=randomized&type=ws&path=/&ed=2048&eh=Sec-WebSocket-Protocol#{نام کاربر}
 ```
 
 پنل این لینک‌ها را برای هر کاربر تولید می‌کند؛ کافی است در جدول کاربران روی **لینک‌ها** کلیک کنید یا از **اشتراک** استفاده کنید.

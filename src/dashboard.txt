@@ -2,7 +2,7 @@
 // Plain browser JS (no build step); loaded via Wrangler Text import.
 var PANEL = '/spider';
 var users = [], locs = [], subs = [], active = 'users';
-var settings = { catalogRouting: true, cdnHosts: [], cleanIps: [], ports: [443], fragment: true, outboundMode: 'proxy-first', ech: false, alpn: [] };
+var settings = { catalogRouting: true, cleanIps: [], ports: [443], outboundMode: 'direct-first', ech: true, alpn: [] };
 var editingUuid = '', editingLoc = '', currentLinks = [], latencyResults = [];
 var cat = null, catLoading = false, catOpenCountry = '', catProto = 'all';
 
@@ -58,8 +58,8 @@ function statePill(u) {
   return '<span class="pill ok">فعال</span>';
 }
 
-// Links come from the server (/links/{uuid}) so CDN hosts, TLS ports and
-// fragment settings apply the same way they do in the subscription.
+// Links come from the server (/links/{uuid}) so live clean IPs and TLS ports
+// apply the same way they do in the subscription.
 
 function copyText(t) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -116,14 +116,15 @@ function locsTab() {
     return '<tr><td><span class="pill ok">' + escHtml(String(l.code).toUpperCase()) + '</span></td>' +
       '<td>' + escHtml(l.name || '') + '</td>' +
       '<td class="ltr" style="font-size:11px">' + escHtml(ps) + '</td>' +
+      '<td><span class="pill info" data-health-code="' + escHtml(l.code) + '">پینگ: —</span></td>' +
       '<td><div class="actions">' +
       rowBtn('loc-edit', l.code, 'ویرایش') +
       rowBtn('loc-del', l.code, 'حذف', true) +
       '</div></td></tr>';
   }).join('');
-  if (!rows) rows = '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">لوکیشن دستی ثبت نشده — کشورهای کاتالوگ زنده بدون ثبت هم کار می‌کنند (تب کاتالوگ)</td></tr>';
+  if (!rows) rows = '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">لوکیشن دستی ثبت نشده — کشورهای کاتالوگ زنده بدون ثبت هم کار می‌کنند (تب کاتالوگ)</td></tr>';
   return '<div class="top"><h2>لوکیشن‌ها (کشورها)</h2><button class="small" data-act="loc-new">+ لوکیشن</button></div>' +
-    '<div class="card tbwrap"><table><thead><tr><th>کد</th><th>نام</th><th>پروکسی‌ها</th><th>عملیات</th></tr></thead><tbody>' +
+    '<div class="card tbwrap"><table><thead><tr><th>کد</th><th>نام</th><th>پروکسی‌ها</th><th>بهترین پینگ</th><th>عملیات</th></tr></thead><tbody>' +
     rows + '</tbody></table></div>' +
     '<p class="muted" style="margin-top:10px">فرمت پروکسی: <code>ip:port</code> رله خام، یا <code>socks5://user:pass@ip:port</code> / <code>http://ip:port</code></p>';
 }
@@ -247,13 +248,12 @@ function settingsTab() {
   var alpn = settings.alpn || [];
   return '<div class="card"><h2>تنظیمات اتصال و اشتراک</h2>' +
     '<p class="muted" style="margin-bottom:8px">تغییرات سمت Worker اعمال می‌شوند؛ کاربر نهایی فقط اشتراک خود را Refresh می‌کند.</p>' +
-    '<div class="kv"><div><label>هاست‌های CDN (هر خط یک دامنه)</label><textarea id="s-cdn" class="ltr" rows="4">' + escHtml((settings.cdnHosts || []).join('\n')) + '</textarea></div>' +
-    '<div><label>کلین‌آی‌پی‌ها (IP یا IP:Port، هر خط یک مورد)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
+    '<div class="kv"><div><label>کلین‌آی‌پی‌های تأییدشده (هر خط یک IP یا IP:Port)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
     '<div><label>پورت‌های TLS (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
     '<label>حالت خروجی</label><select id="s-outbound"><option value="proxy-first"' + (settings.outboundMode === 'proxy-first' ? ' selected' : '') + '>اول پروکسی، سپس مستقیم</option><option value="direct-first"' + (settings.outboundMode === 'direct-first' ? ' selected' : '') + '>اول مستقیم، سپس پروکسی</option><option value="proxy-only"' + (settings.outboundMode === 'proxy-only' ? ' selected' : '') + '>فقط پروکسی (بدون نشت خروجی)</option></select></div>' +
     '<div><label>ALPN (اختیاری)</label><select id="s-alpn" multiple size="3"><option value="h3"' + (alpn.indexOf('h3') >= 0 ? ' selected' : '') + '>h3</option><option value="h2"' + (alpn.indexOf('h2') >= 0 ? ' selected' : '') + '>h2</option><option value="http/1.1"' + (alpn.indexOf('http/1.1') >= 0 ? ' selected' : '') + '>http/1.1</option></select></div>' +
     '<div><label>گزینه‌های TLS</label><label style="display:flex;gap:8px;align-items:center"><input id="s-ech" type="checkbox" style="width:auto"' + (settings.ech ? ' checked' : '') + '> فعال‌سازی ECH</label>' +
-    '<label style="margin-top:12px">فرگمنت TLS</label><button class="small ' + (settings.fragment ? '' : 'ghost') + '" data-act="save-settings" data-frag="' + (!settings.fragment) + '">' + (settings.fragment ? 'فعال ✓' : 'غیرفعال') + '</button></div></div>' +
+    '<p class="muted" style="margin-top:12px">CDN و Fragment از تولید نود حذف شده‌اند.</p></div></div>' +
     '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-settings">ذخیره تنظیمات</button></div></div>' +
     '<div class="card"><h2>مسیریابی و فرمت‌ها</h2>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap"><div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b><div class="muted" style="margin-top:3px">هر کشور کاتالوگ به‌صورت خودکار مسیر چندلوکیشنی می‌سازد.</div></div>' +
@@ -282,11 +282,9 @@ async function toggleCatalogRouting() {
   } catch (e) { toast('خطا: ' + e.message, false); }
 }
 
-async function saveSettingsForm(fragToggle) {
+async function saveSettingsForm() {
   var body = {};
-  if (fragToggle !== undefined) body.fragment = fragToggle;
-  if ($('s-cdn')) {
-    body.cdnHosts = $('s-cdn').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+  if ($('s-ips')) {
     body.cleanIps = $('s-ips').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
     body.ports = $('s-ports').value.split(',').map(function (s) { return parseInt(s.trim(), 10); }).filter(function (n) { return n > 0; });
     body.outboundMode = $('s-outbound').value;
@@ -324,6 +322,7 @@ async function refresh() {
   subs = d.subs || [];
   settings = d.settings || settings;
   render();
+  if (active === 'locs') loadLocationHealth();
 }
 
 
@@ -360,10 +359,24 @@ document.addEventListener('click', function (e) {
   if (act === 'cat-proto') { catProto = arg; openCountry(catOpenCountry); return; }
   if (act === 'cat-add') return addCatalogProxies(arg);
   if (act === 'toggle-catalog') return toggleCatalogRouting();
-  if (act === 'save-settings') return saveSettingsForm(arg === 'true' ? true : arg === 'false' ? false : undefined);
+  if (act === 'save-settings') return saveSettingsForm();
   if (act === 'run-latency') return runLatency();
   if (act === 'save-latency') return saveLatencyResults();
 });
+
+async function loadLocationHealth() {
+  var badges = document.querySelectorAll('[data-health-code]');
+  for (var i = 0; i < badges.length; i++) {
+    var badge = badges[i];
+    try {
+      var r = await api('/location-health?code=' + encodeURIComponent(badge.getAttribute('data-health-code')));
+      var live = (r.results || []).filter(function (x) { return x.ok; });
+      badge.textContent = live.length ? ('پینگ: ' + live[0].ms + ' ms') : 'آفلاین';
+      badge.className = 'pill ' + (live.length ? 'ok' : 'off');
+    } catch (e) { badge.textContent = 'نامشخص'; }
+  }
+}
+
 
 window.showUserDlg = function (uuid) {
   editingUuid = uuid || '';
@@ -439,7 +452,7 @@ window.showLinks = async function (uuid) {
   } catch (e) { toast('خطا: ' + e.message, false); currentLinks = []; }
   var body = currentLinks.map(function (l) { return '<div class="cfg ltr">' + escHtml(l) + '</div>'; }).join('') || '<p class="muted">لینکی تولید نشد</p>';
   openDlg('<h2>لینک‌های اتصال — ' + escHtml(u.remark) + '</h2>' +
-    '<p class="muted">دامنه ورکر + CDN/کلین‌آی‌پی × پورت‌های TLS — در کلاینت VLESS ایمپورت کنید:</p>' +
+    '<p class="muted">دامنه Worker + کلین‌آی‌پی‌های تأییدشده × پورت TLS — در کلاینت VLESS ایمپورت کنید:</p>' +
     '<div style="margin-top:10px;max-height:280px;overflow:auto">' + body + '</div>' +
     '<div class="actions" style="margin-top:10px"><button class="small" data-act="copy-all">کپی همه</button>' +
     '<button class="small ghost" data-act="dlg-close">بستن</button></div>');
