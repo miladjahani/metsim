@@ -18,6 +18,7 @@ import {
   getLocations, saveLocations, vlessConfigsForUser, singboxConfigForUsers, clashConfigForUsers, getSettings, saveSettings,
   parseEndpoint, probeTcpEndpoint, getCountryHealth,
 } from "./tunnel.js";
+import { invalidatePreferred, getLivePreferred } from "./preferred.js";
 import { handleCatalog, getCatalogCountryProxies } from "./catalog.js";
 import dashboardJs from "./dashboard.txt";
 
@@ -188,9 +189,25 @@ export async function handlePanel(request, env, url) {
       outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(b.outboundMode) ? b.outboundMode : cur.outboundMode,
       ech: typeof b.ech === "boolean" ? b.ech : cur.ech,
       alpn: Array.isArray(b.alpn) ? b.alpn : cur.alpn,
+      epd: typeof b.epd === "boolean" ? b.epd : cur.epd,
+      epi: typeof b.epi === "boolean" ? b.epi : cur.epi,
+      egi: typeof b.egi === "boolean" ? b.egi : cur.egi,
+      nonTls: typeof b.nonTls === "boolean" ? b.nonTls : cur.nonTls,
+      preferredUrl: typeof b.preferredUrl === "string" ? b.preferredUrl : cur.preferredUrl,
+      dnsUrl: typeof b.dnsUrl === "string" ? b.dnsUrl : cur.dnsUrl,
     };
     await saveSettings(env, next);
+    // cfnew behaviour: preferred-source changes take effect on the next refresh.
+    await invalidatePreferred(env);
     return json({ ok: true, settings: await getSettings(env) });
+  }
+
+  // Live preferred-address pool status (cfnew 优选 sources + probe results).
+  if (sub === "/preferred" && method === "GET") {
+    const force = url.searchParams.get("refresh") === "1";
+    const settings = await getSettings(env);
+    const live = await getLivePreferred(env, settings, force);
+    return json({ ok: true, ...live, bestipUrl: settings.preferredUrl || undefined });
   }
 
   if (sub === "/location-health" && method === "GET") {
@@ -410,6 +427,7 @@ function dashPage() {
     '<button class="small ghost" data-act="tab" data-arg="users">کاربران</button>' +
     '<button class="small ghost" data-act="tab" data-arg="locs">لوکیشن‌ها</button>' +
     '<button class="small ghost" data-act="tab" data-arg="catalog">کاتالوگ زنده</button>' +
+    '<button class="small ghost" data-act="tab" data-arg="pref">آدرس‌های برتر</button>' +
     '<button class="small ghost" data-act="tab" data-arg="latency">تست IP</button>' +
     '<button class="small ghost" data-act="tab" data-arg="subs">اشتراک‌ها</button>' +
     '<button class="small ghost" data-act="tab" data-arg="settings">تنظیمات</button>' +

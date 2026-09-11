@@ -2,9 +2,10 @@
 // Plain browser JS (no build step); loaded via Wrangler Text import.
 var PANEL = '/spider';
 var users = [], locs = [], subs = [], active = 'users';
-var settings = { catalogRouting: true, cleanIps: [], ports: [443], outboundMode: 'direct-first', ech: true, alpn: [] };
+var settings = { catalogRouting: true, cleanIps: [], ports: [443], outboundMode: 'direct-first', ech: true, alpn: [], epd: true, epi: true, egi: true, nonTls: true, preferredUrl: '', dnsUrl: 'https://223.5.5.5/dns-query' };
 var editingUuid = '', editingLoc = '', currentLinks = [], latencyResults = [];
 var cat = null, catLoading = false, catOpenCountry = '', catProto = 'all';
+var pref = null, prefLoading = false;
 
 function $(id) { return document.getElementById(id); }
 
@@ -246,20 +247,57 @@ function subsTab() {
 
 function settingsTab() {
   var alpn = settings.alpn || [];
-  return '<div class="card"><h2>تنظیمات اتصال و اشتراک</h2>' +
+  function tgl(id, on, label) {
+    return '<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input id="' + id + '" type="checkbox" style="width:auto"' + (on ? ' checked' : '') + '> ' + label + '</label>';
+  }
+  return '<div class="card"><h2>تنظیمات اتصال و اشتراک (موتور cfnew)</h2>' +
     '<p class="muted" style="margin-bottom:8px">تغییرات سمت Worker اعمال می‌شوند؛ کاربر نهایی فقط اشتراک خود را Refresh می‌کند.</p>' +
-    '<div class="kv"><div><label>کلین‌آی‌پی‌های تأییدشده (هر خط یک IP یا IP:Port)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
-    '<div><label>پورت‌های TLS (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
-    '<label>حالت خروجی</label><select id="s-outbound"><option value="proxy-first"' + (settings.outboundMode === 'proxy-first' ? ' selected' : '') + '>اول پروکسی، سپس مستقیم</option><option value="direct-first"' + (settings.outboundMode === 'direct-first' ? ' selected' : '') + '>اول مستقیم، سپس پروکسی</option><option value="proxy-only"' + (settings.outboundMode === 'proxy-only' ? ' selected' : '') + '>فقط پروکسی (بدون نشت خروجی)</option></select></div>' +
+    '<div class="kv"><div><label>آدرس‌های دلخواه (cfnew yx — هر خط یک دامنه یا IP:Port؛ خالی = منابع زنده)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
+    '<div><label>پورت‌های TLS برای آدرس‌های بدون پورت (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
+    '<label>حالت خروجی (مسیرهای کشوری)</label><select id="s-outbound"><option value="proxy-first"' + (settings.outboundMode === 'proxy-first' ? ' selected' : '') + '>اول پروکسی، سپس مستقیم</option><option value="direct-first"' + (settings.outboundMode === 'direct-first' ? ' selected' : '') + '>اول مستقیم، سپس پروکسی</option><option value="proxy-only"' + (settings.outboundMode === 'proxy-only' ? ' selected' : '') + '>فقط پروکسی (بدون نشت خروجی)</option></select></div>' +
     '<div><label>ALPN (اختیاری)</label><select id="s-alpn" multiple size="3"><option value="h3"' + (alpn.indexOf('h3') >= 0 ? ' selected' : '') + '>h3</option><option value="h2"' + (alpn.indexOf('h2') >= 0 ? ' selected' : '') + '>h2</option><option value="http/1.1"' + (alpn.indexOf('http/1.1') >= 0 ? ' selected' : '') + '>http/1.1</option></select></div>' +
-    '<div><label>گزینه‌های TLS</label><label style="display:flex;gap:8px;align-items:center"><input id="s-ech" type="checkbox" style="width:auto"' + (settings.ech ? ' checked' : '') + '> فعال‌سازی ECH</label>' +
-    '<p class="muted" style="margin-top:12px">CDN و Fragment از تولید نود حذف شده‌اند.</p></div></div>' +
+    '<div><label>آدرس منبع دلخواه (cfnew yxURL — لیست host:port#name)</label><input id="s-purl" class="ltr" value="' + escHtml(settings.preferredUrl || '') + '" placeholder="https://…/bestip.txt"></div>' +
+    '<div><label>سرور DNS (cfnew customDNS)</label><input id="s-dns" class="ltr" value="' + escHtml(settings.dnsUrl || 'https://223.5.5.5/dns-query') + '"></div></div>' +
+    '<label style="margin-top:12px">منابع آدرس برتر (مطابق cfnew)</label>' +
+    tgl('s-epd', settings.epd !== false, 'دامنه‌های برتر کلادفلر (epd)') +
+    tgl('s-epi', settings.epi !== false, 'IPهای برتر اپراتورها — uouin (epi)') +
+    tgl('s-egi', settings.egi !== false, 'لیست bestip مخزن گیت‌هاب (egi)') +
+    tgl('s-nontls', settings.nonTls !== false, 'نودهای بدون TLS روی پورت‌های HTTP (et)') +
+    tgl('s-ech', !!settings.ech, 'فعال‌سازی ECH (fp=chrome)') +
     '<div class="actions" style="margin-top:14px"><button class="small" data-act="save-settings">ذخیره تنظیمات</button></div></div>' +
     '<div class="card"><h2>مسیریابی و فرمت‌ها</h2>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap"><div><b style="font-size:13px">مسیریابی خودکار کاتالوگ</b><div class="muted" style="margin-top:3px">هر کشور کاتالوگ به‌صورت خودکار مسیر چندلوکیشنی می‌سازد.</div></div>' +
     '<button class="small ' + (settings.catalogRouting ? '' : 'ghost') + '" data-act="toggle-catalog">' + (settings.catalogRouting ? 'فعال ✓' : 'غیرفعال') + '</button></div>' +
     '<p class="muted" style="margin:8px 0">دامنه Worker: <code>' + location.host + '</code> — کاربران: <b>' + users.length + '</b> — لوکیشن‌ها: <b>' + locs.length + '</b> — اشتراک‌ها: <b>' + subs.length + '</b></p>' +
     '<p class="muted" style="margin:8px 0">VLESS: <code>' + location.origin + '/sub/{token}</code> — sing-box: <code>?target=singbox</code> — Clash: <code>?target=clash</code></p></div>';
+}
+
+function prefTab() {
+  if (!pref && !prefLoading) { loadPreferred(false); return '<div class="muted">در حال دریافت استخر آدرس‌های زنده…</div>'; }
+  if (!pref) return '<div class="muted">در حال دریافت استخر آدرس‌های زنده…</div>';
+  var rows = (pref.live || []).map(function (p) {
+    return '<tr><td class="ltr">' + escHtml(p.host) + ':' + p.port + '</td>' +
+      '<td><span class="pill ' + (p.tls === false ? 'warn' : 'ok') + '">' + (p.tls === false ? 'بدون TLS' : 'TLS') + '</span></td>' +
+      '<td>' + escHtml(p.name || '') + '</td>' +
+      '<td><span class="pill info">' + p.ms + ' ms</span></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="muted" style="text-align:center;padding:20px">هیچ آدرسی زنده نیست — منابع را بررسی کنید</td></tr>';
+  var upd = new Date((pref.at || 0) * 1000).toLocaleTimeString('fa-IR');
+  return '<div class="top"><h2>آدرس‌های برتر زنده (cfnew)</h2>' +
+    '<button class="small ghost" data-act="pref-refresh">تست مجدد' + (prefLoading ? '…' : '') + '</button></div>' +
+    '<div class="msg ok" style="margin:0 0 12px">هر نود فقط بعد از عبور از تست TCP زنده ساخته می‌شود؛ استخر هر ۲۰ دقیقه با پنجره‌ی بعدی تازه می‌شود.</div>' +
+    '<p class="muted" style="margin-bottom:12px">استخر: <b>' + (pref.poolSize || 0) + '</b> کاندید — تست‌شده در این پنجره: <b>' + (pref.probedCount || 0) + '</b> — زنده: <b>' + (pref.live || []).length + '</b> — آخرین به‌روزرسانی: ' + upd +
+    (pref.bestipUrl ? ' — منبع: <code class="ltr">' + escHtml(pref.bestipUrl) + '</code>' : '') + '</p>' +
+    '<div class="card tbwrap"><table><thead><tr><th>آدرس</th><th>حالت</th><th>منبع</th><th>پینگ</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function loadPreferred(force) {
+  prefLoading = true;
+  render();
+  try {
+    pref = await api('/preferred' + (force ? '?refresh=1' : ''));
+  } catch (e) { toast('خطا در دریافت آدرس‌های زنده: ' + e.message, false); }
+  prefLoading = false;
+  render();
 }
 
 function latencyTab() {
@@ -290,6 +328,12 @@ async function saveSettingsForm() {
     body.outboundMode = $('s-outbound').value;
     body.ech = $('s-ech').checked;
     body.alpn = Array.prototype.map.call($('s-alpn').selectedOptions, function (o) { return o.value; });
+    body.epd = $('s-epd').checked;
+    body.epi = $('s-epi').checked;
+    body.egi = $('s-egi').checked;
+    body.nonTls = $('s-nontls').checked;
+    body.preferredUrl = $('s-purl').value.trim();
+    body.dnsUrl = $('s-dns').value.trim();
   }
   try {
     var r = await api('/settings', 'POST', JSON.stringify(body));
@@ -304,9 +348,9 @@ function render() {
   var body;
   if (active === 'users') body = usersTab();
   else if (active === 'locs') body = locsTab();
-  else if (active === 'subs') body = subsTab();
-  else if (active === 'catalog') body = catalogTab();
-  else if (active === 'latency') body = latencyTab();
+  else if (active === 'subs') body = subsTab();    else if (active === 'catalog') body = catalogTab();
+    else if (active === 'pref') body = prefTab();
+    else if (active === 'latency') body = latencyTab();
   else body = settingsTab();
   v.innerHTML = (active !== 'settings' ? statCards() : '') + body;
   var tabs = document.querySelectorAll('.tabs button');
@@ -358,6 +402,7 @@ document.addEventListener('click', function (e) {
   if (act === 'cat-refresh') return loadCatalog(true);
   if (act === 'cat-proto') { catProto = arg; openCountry(catOpenCountry); return; }
   if (act === 'cat-add') return addCatalogProxies(arg);
+  if (act === 'pref-refresh') return loadPreferred(true);
   if (act === 'toggle-catalog') return toggleCatalogRouting();
   if (act === 'save-settings') return saveSettingsForm();
   if (act === 'run-latency') return runLatency();

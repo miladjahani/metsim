@@ -78,12 +78,12 @@ console.log("── settings + latency ──");
 {
   const s0 = await req("/spider/state");
   const st0 = await s0.json();
-  check("settings defaults are present", s0.status === 200 && st0.settings.catalogRouting === true && Array.isArray(st0.settings.cleanIps));
+  check("settings defaults are present", s0.status === 200 && st0.settings.catalogRouting === true && Array.isArray(st0.settings.cleanIps) && st0.settings.epd === true && st0.settings.egi === true && st0.settings.dnsUrl.includes("dns-query"));
   const saved = await req("/spider/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-    catalogRouting: true, cleanIps: ["1.1.1.1:443", "8.8.8.8"], outboundMode: "proxy-only", ech: true, alpn: ["h2"], fragment: true,
+    catalogRouting: true, cleanIps: ["1.1.1.1:443", "8.8.8.8"], outboundMode: "proxy-only", ech: true, alpn: ["h2"], fragment: true, nonTls: false,
   }) });
   const sj = await saved.json();
-  check("advanced settings normalized", saved.status === 200 && sj.settings.cleanIps[0] === "1.1.1.1:443" && sj.settings.outboundMode === "proxy-only" && sj.settings.ech === true && sj.settings.alpn[0] === "h2" && !Object.prototype.hasOwnProperty.call(sj.settings, "fragment"));
+  check("advanced settings normalized", saved.status === 200 && sj.settings.cleanIps[0] === "1.1.1.1:443" && sj.settings.outboundMode === "proxy-only" && sj.settings.ech === true && sj.settings.alpn[0] === "h2" && sj.settings.nonTls === false && !Object.prototype.hasOwnProperty.call(sj.settings, "fragment"));
   const latency = await req("/spider/latency", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ targets: ["1.1.1.1:443", "bad target"] }) });
   const ljson = await latency.json();
   check("latency endpoint returns bounded results", latency.status === 200 && ljson.ok && ljson.results.length === 2);
@@ -101,8 +101,17 @@ let subToken = "";
   const body = await pub.text();
   const decoded = Buffer.from(body, "base64").toString("utf8");
   check("VLESS subscription is base64", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
-  check("custom clean IP + direct link options", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("ech=1") && decoded.includes("&ed=2048") && decoded.includes("&eh=Sec-WebSocket-Protocol") && !decoded.includes("fragment=") && !decoded.includes("cdn"));
+  check("cfnew link shape (fp/ech/ed/eh)", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("fp=chrome") && decoded.includes("ech=" + encodeURIComponent("cloudflare-ech.com+https://223.5.5.5/dns-query")) && decoded.includes("&ed=2048") && decoded.includes("&eh=Sec-WebSocket-Protocol") && !decoded.includes("fragment=") && !decoded.includes("cdn"));
+  check("cfnew node naming", decoded.includes("%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BC%98%E9%80%89-01") || decoded.includes("%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BC%98%E9%80%89-02"));
   check("country routes remain multi-location", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
+
+  // Preferred pool: with custom cleanIps set, custom entries replace remote
+  // sources (cfnew behaviour) and only live-probed pairs survive.
+  const pref = await req("/spider/preferred?refresh=1");
+  const pj = await pref.json();
+  check("preferred pool probes custom entries", pref.status === 200 && pj.ok && Array.isArray(pj.live));
+  check("preferred pool only has live pairs", Array.isArray(pj.live) && pj.live.every((p) => p.ok && p.ms >= 0));
+  check("preferred pool expanded ports", Array.isArray(pj.live) && pj.live.some((p) => p.host === "1.1.1.1" && p.port === 443));
 
   const sb = await req("/sub/" + subToken + "?target=singbox");
   const sbBody = await sb.text();

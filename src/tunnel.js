@@ -7,6 +7,9 @@
 
 import { connect } from "cloudflare:sockets";
 import { getCatalogCountryProxies } from "./catalog.js";
+import {
+  getLivePreferred, invalidatePreferred, nodeBaseName, DEFAULT_BESTIP_URL,
+} from "./preferred.js";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -206,31 +209,19 @@ export async function saveLocations(env, locs) {
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
-// catalogRouting: catalog countries act as locations automatically (default on).
-// cleanIps: operator-tested Cloudflare edge IPs. They are only client-facing
-// addresses and always keep the Worker hostname as SNI/Host. They are never
-// assumed to be reachable: the panel latency test is the source of truth.
+// Mirrors the cfnew engine (byJoey/cfnew) switch by switch:
+//   cleanIps     → cfnew `yx`  : manual preferred addresses (empty = auto)
+//   epd          → cfnew `epd` : preferred domain list (直连域名列表)
+//   epi          → cfnew `epi` : per-ISP preferred IPs (uouin API)
+//   egi          → cfnew `egi` : repo bestip list (仓库优选)
+//   preferredUrl → cfnew `yxURL`: custom bestip source URL
+//   nonTls       → cfnew `et`  : also emit security=none nodes on HTTP ports
+//   ech          → cfnew `ech` : ECH link parameter (fp becomes chrome)
+//   alpn/dnsUrl  → cfnew alpn/customDNS
 // outboundMode controls the server-side country relay; direct-first is the
 // default so a normal VLESS node never applies a proxy unnecessarily.
-// ech/alpn: opt-in client TLS hints for clients that support them. Like cfnew,
-// ECH defaults to OFF — enabling it can break strict TLS middleboxes.
 const PORT_DEFAULTS = [443];
-// cfnew's default preferred Cloudflare edge pool. These are direct edge
-// addresses, not outbound relays: the client connects to the IP while TLS
-// SNI/Host stays set to the Worker domain. A node is emitted only after the
-// address passes the same live TCP probe used by the panel.
-const DEFAULT_EDGE_IPS = [
-  "172.71.218.190",
-  "162.158.228.87",
-  "162.158.189.134",
-  "162.158.26.63",
-  "162.158.25.86",
-  "162.158.29.216",
-  "162.158.218.160",
-  "162.158.227.214",
-  "172.69.118.198",
-  "172.69.119.150",
-];
+const DEFAULT_DNS_URL = "https://223.5.5.5/dns-query";
 const ALPN_VALUES = new Set(["h3", "h2", "http/1.1"]);
 
 function normalizeSettings(s) {
@@ -240,18 +231,24 @@ function normalizeSettings(s) {
     : PORT_DEFAULTS.slice();
   const cleanIps = Array.isArray(s.cleanIps)
     ? s.cleanIps.map((x) => String(x).trim()).filter(Boolean).slice(0, 40)
-    : DEFAULT_EDGE_IPS.slice();
+    : [];
   const alpn = Array.isArray(s.alpn)
     ? s.alpn.map((x) => String(x).trim()).filter((x) => ALPN_VALUES.has(x)).slice(0, 3)
     : [];
   return {
     catalogRouting: s.catalogRouting !== false,
-    cleanIps: cleanIps.length ? cleanIps : DEFAULT_EDGE_IPS.slice(),
+    cleanIps,
     ports: ports.length ? ports : PORT_DEFAULTS.slice(),
     outboundMode: ["proxy-first", "direct-first", "proxy-only"].includes(s.outboundMode) ? s.outboundMode : "direct-first",
     ech: s.ech === true,
     echQueryDomain: String(s.echQueryDomain || "cloudflare-ech.com").trim() || "cloudflare-ech.com",
     alpn,
+    epd: s.epd !== false,
+    epi: s.epi !== false,
+    egi: s.egi !== false,
+    nonTls: s.nonTls !== false,
+    preferredUrl: String(s.preferredUrl || "").trim(),
+    dnsUrl: String(s.dnsUrl || "").trim() || DEFAULT_DNS_URL,
   };
 }
 
@@ -294,6 +291,8 @@ export function parseEndpoint(entry, defaultPort = 443) {
   return { host: value, port: defaultPort };
 }
 
+// TCP probe kept for the panel latency tool (catalog proxies / manual hosts).
+// Preferred addresses are gated by the dedicated probe in preferred.js.
 export async function probeTcpEndpoint(host, port = 443, timeoutMs = 3500) {
   const connector = getConnector();
   if (!connector || !host || !Number.isInteger(Number(port))) return { ok: false, ms: -1 };
@@ -480,7 +479,7 @@ async function connectViaProxy(proxyEntry, targetHost, targetPort, loc) {
 
 // ── Fastest-proxy balancer ───────────────────────────────────────────────────
 const PROBE_TIMEOUT_MS = 4000;
-const PROBE_TTL_MS = 1200000; // refresh the live pool every 20 minutes
+const PROBE_TTL_MS = 20 * 60 * 1000; // refresh the live pool every 20 minutes
 const HEALTH_TTL_SEC = 1200;
 const HEALTH_PROBE_MAX = 20;
 const FASTEST_CACHE = Object.create(null); // country code → { order, at }
@@ -568,15 +567,21 @@ export async function getCountryHealth(env, country, entries, loc) {
 }
 
 async function rankCountryProxies(env, loc) {
-  return rankProxyEntries(env, loc && (loc.code || loc.country), countryProxyList(loc), loc);
+  // Rank manual relays first, then merge in the LIVE preferred-address pool
+  // from the cfnew engine (preferred domains + per-ISP IPs + repo bestip).
+  // Preferred entries are gated by a live TCP probe, so only reachable
+  // addresses ever win the race — relays are probed on connect anyway.
+  const manual = await rankProxyEntries(env, loc && (loc.code || loc.country), countryProxyList(loc), loc);
+  const settings = await getSettings(env);
+  const preferred = await getLivePreferred(env, settings);
+  const preferredEntries = (preferred.live || []).map((p) => (p.tls ? "https://" : "http://") + p.host + ":" + p.port);
+  return [...manual, ...preferredEntries];
 }
 
 // Resolve the outbound connection for a tunnel session.
 // Country routes: manual location pool first (fastest-probe order), then the
-// LIVE catalog for that country (EDT-Pages/Proxy-List) — so every catalog
-// country is routable without manual setup. Direct routes: user.proxy_ip, or
-// direct egress with anti-loop (never back into this Worker).
-const PROBE_MAX = 8;
+// LIVE preferred pool (cfnew) + catalog for that country. Direct routes:
+// user.proxy_ip, or direct egress with anti-loop (never back into this Worker).
 const TRY_MAX = 5;
 
 export async function connectOutbound(env, country, user, targetHost, targetPort, workerHost) {
@@ -597,7 +602,6 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
     candidates = [String(user.proxy_ip || "").trim()].filter(Boolean);
   }
   let tried = 0;
-  const proxyEntries = candidates.slice();
   const direct = () => {
     const target = String(targetHost || "").toLowerCase();
     if (target && target !== String(workerHost || "").toLowerCase()) return openSocket(target, targetPort);
@@ -636,31 +640,34 @@ export async function connectOutbound(env, country, user, targetHost, targetPort
   return null;
 }
 
-// ── Config generation ────────────────────────────────────────────────────
-// Server-side generation: the Worker hostname + validated clean IPs × TLS
-// ports × user countries. There is intentionally no CDN fronting or fragment
-// option: each generated node is a normal direct VLESS-over-WS endpoint.
+// ── Config generation (cfnew engine) ────────────────────────────────────
+// Mirrors byJoey/cfnew's node pipeline: the address pool comes from the live
+// preferred sources (custom → preferred domains → per-ISP IPs → repo bestip),
+// every address passes a live TCP probe before it becomes a node, and links
+// are shaped exactly like cfnew's: path=/?ed=2048, eh=Sec-WebSocket-Protocol,
+// fp=randomized (chrome when ECH is on), alpn + ech=<domain>+<dns>.
 const CONFIG_CAP = 200;
 export async function nodesForUser(env, u, domain, settings) {
   const s = normalizeSettings(settings);
   const countries = Array.isArray(u.countries) && u.countries.length ? u.countries : [""];
+  const live = await getLivePreferred(env, s);
+  const counters = new Map();
   const nodes = [];
-  const liveCleanIps = await rankProxyEntries(env, "clean", s.cleanIps, null);
-  const edgeEntries = liveCleanIps.length ? liveCleanIps : s.cleanIps;
-  for (const code of countries) {
-    const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/";
-    const label = (u.remark || "user") + (code ? "-" + String(code).toUpperCase() : "");
-    for (const rawIp of edgeEntries.slice(0, 6)) {
-      const endpoint = parseEndpoint(rawIp, 443);
-      if (!endpoint) continue;
+  for (const pair of (live.live || []).slice(0, 10)) {
+    const base = nodeBaseName(pair);
+    counters.set(base, (counters.get(base) || 0) + 1);
+    const name = base + "-" + String(counters.get(base)).padStart(2, "0");
+    for (const code of countries) {
+      const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/?ed=2048";
       nodes.push({
-        tag: label + "-" + endpoint.host + ":" + endpoint.port,
+        tag: (u.remark || "user") + "-" + name,
         uuid: u.uuid,
-        address: endpoint.host,
-        port: endpoint.port,
+        address: pair.host.includes(":") ? "[" + pair.host + "]" : pair.host,
+        port: pair.port,
         host: domain,
         path,
         earlyData: 2048,
+        tls: pair.tls !== false,
         country: code || "",
       });
     }
@@ -670,14 +677,14 @@ export async function nodesForUser(env, u, domain, settings) {
 
 function vlessLink(node, settings) {
   const s = normalizeSettings(settings);
-  // Same parameter shape as cfnew links: security=tls, type=ws, fp=chrome,
-  // path with 0-RTT via the Sec-WebSocket-Protocol header.
-  const q = "encryption=none&security=tls&sni=" + encodeURIComponent(node.host) +
-    "&host=" + encodeURIComponent(node.host) + "&fp=chrome&type=ws&path=" +
-    encodeURIComponent(node.path) + "&ed=" + node.earlyData + "&eh=Sec-WebSocket-Protocol" +
+  const addr = String(node.address || "");
+  const q = "encryption=none&security=" + (node.tls === false ? "none" : "tls") +
+    (node.tls === false ? "" : "&sni=" + encodeURIComponent(node.host)) +
+    "&fp=" + (s.ech ? "chrome" : "randomized") + "&type=ws&host=" + encodeURIComponent(node.host) +
+    "&path=" + encodeURIComponent(node.path) + "&ed=" + node.earlyData + "&eh=Sec-WebSocket-Protocol" +
     (s.alpn.length ? "&alpn=" + encodeURIComponent(s.alpn.join(",")) : "") +
-    (s.ech ? "&ech=1" : "");
-  return "vless://" + node.uuid + "@" + node.address + ":" + node.port + "?" + q +
+    (s.ech ? "&ech=" + encodeURIComponent(s.echQueryDomain + "+" + s.dnsUrl) : "");
+  return "vless://" + node.uuid + "@" + addr + ":" + node.port + "?" + q +
     "#" + encodeURIComponent(node.tag);
 }
 
@@ -726,6 +733,7 @@ export async function clashConfigForUsers(env, users, domain, settings) {
     let suffix = 2;
     while (usedTags.has(name)) name = node.tag + "-" + suffix++;
     usedTags.add(name);
+    const isTls = node.tls !== false;
     const proxy = {
       name,
       type: "vless",
@@ -733,7 +741,7 @@ export async function clashConfigForUsers(env, users, domain, settings) {
       port: node.port,
       uuid: node.uuid,
       udp: true,
-      tls: true,
+      tls: isTls,
       servername: node.host,
       network: "ws",
       "ws-opts": {
@@ -742,9 +750,10 @@ export async function clashConfigForUsers(env, users, domain, settings) {
         "max-early-data": node.earlyData,
         "early-data-header-name": "Sec-WebSocket-Protocol",
       },
+      "client-fingerprint": normalized.ech ? "chrome" : "randomized",
     };
     if (normalized.alpn.length) proxy.alpn = normalized.alpn;
-    if (normalized.ech) proxy["ech-opts"] = { enabled: true, "query-server-name": node.host };
+    if (normalized.ech && isTls) proxy["ech-opts"] = { enabled: true, "query-server-name": normalized.echQueryDomain };
     proxies.push(proxy);
   }
   const tags = proxies.map((p) => p.name);
@@ -776,7 +785,9 @@ export async function clashConfigForUsers(env, users, domain, settings) {
 // DNS + rule-based servers, mixed + tun inbounds, per-service selector groups
 // that all fall back to the main selector, one VLESS outbound per node with
 // ws transport + 0-RTT early data + randomized uTLS, urltest groups per country.
-function singboxOutbound(node) {
+function singboxOutbound(node, settings) {
+  const s = normalizeSettings(settings);
+  const isTls = node.tls !== false;
   const out = {
     type: "vless",
     tag: node.tag,
@@ -784,12 +795,12 @@ function singboxOutbound(node) {
     server_port: node.port,
     uuid: node.uuid,
     tls: {
-      enabled: true,
+      enabled: isTls,
       server_name: node.host,
       insecure: false,
-      utls: { enabled: true, fingerprint: "chrome" },
-      ...(normalizeSettings(node.settings || {}).alpn.length ? { alpn: normalizeSettings(node.settings).alpn } : {}),
-      ...(normalizeSettings(node.settings || {}).ech ? { ech: { enabled: true } } : {}),
+      utls: { enabled: true, fingerprint: s.ech ? "chrome" : "randomized" },
+      ...(s.alpn.length ? { alpn: s.alpn } : {}),
+      ...(s.ech ? { ech: { enabled: true, query_domain: s.echQueryDomain } } : {}),
     },
     transport: {
       type: "ws",
@@ -805,7 +816,7 @@ function singboxOutbound(node) {
 export async function singboxConfigForUsers(env, users, domain, settings) {
   const normalized = normalizeSettings(settings);
   const nodeLists = await Promise.all(users.map((u) => nodesForUser(env, u, domain, normalized)));
-  const nodes = nodeLists.flat().map((node) => ({ ...node, settings: normalized })).slice(0, CONFIG_CAP);
+  const nodes = nodeLists.flat().slice(0, CONFIG_CAP);
   const tags = nodes.map((n) => n.tag);
 
   const serviceGroups = [
@@ -826,7 +837,7 @@ export async function singboxConfigForUsers(env, users, domain, settings) {
     outbounds.push({ type: "selector", tag: g.tag, outbounds: [g.first, "select"].concat(tags) });
   }
   outbounds.push({ type: "selector", tag: "🎯 全球直连", outbounds: ["direct"] });
-  for (const n of nodes) outbounds.push(singboxOutbound(n));
+  for (const n of nodes) outbounds.push(singboxOutbound(n, normalized));
 
   // Country urltest groups for the countries actually present in the sub.
   const byCountry = new Map();
@@ -843,7 +854,7 @@ export async function singboxConfigForUsers(env, users, domain, settings) {
     log: { level: "info", timestamp: true },
     dns: {
       servers: [
-        { tag: "remote", address: "https://223.5.5.5/dns-query", detour: "select" },
+        { tag: "remote", address: normalized.dnsUrl, detour: "select" },
         { tag: "local", address: "223.5.5.5", detour: "direct" },
         { tag: "fakeip", address: "fakeip" },
         { tag: "block", address: "rcode://success" },
