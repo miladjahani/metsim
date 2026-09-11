@@ -263,8 +263,9 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
-// Build the raw candidate pool in cfnew's exact order: custom addresses win,
-// otherwise preferred domains + uouin per-ISP IPs + repo bestip list.
+// Build the raw candidate pool in cfnew's order. Custom addresses are
+// prepended (not exclusive) so stale/broken manual entries can never starve
+// the live sources — everything is probed anyway and only live pairs survive.
 export function buildPool(settings, bestipRows, uouinRows) {
   const custom = (settings.cleanIps || []).map((raw) => {
     let v = String(raw || "").trim();
@@ -273,8 +274,7 @@ export function buildPool(settings, bestipRows, uouinRows) {
     if (m && !v.includes("://")) { v = m[1].replace(/^\[|\]$/g, ""); port = parseInt(m[2], 10) || 0; }
     return { host: v, port, name: "自定义优选" };
   }).filter((c) => c.host);
-  if (custom.length) return custom; // cfnew: custom preferred replaces remote sources
-  const pool = [];
+  const pool = custom;
   if (settings.epd !== false) {
     for (const d of PREFERRED_DOMAINS) pool.push({ host: d.domain, port: 0, name: d.name || d.domain });
   }
@@ -318,6 +318,18 @@ export async function getLivePreferred(env, settings, force = false) {
     } catch { /* fall through to a live refresh */ }
   }
   if (mem.inflight) return mem.inflight;
+  // Keep the last known-good pool (memory first, then KV even if expired) so a
+  // refresh can merge fresh probes on top of it instead of starting from zero.
+  let prev = mem.value;
+  if (!prev) {
+    try {
+      const raw = await env.SPIDER_KV.get(PREF_CACHE_KEY);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c && c.value) prev = c.value;
+      }
+    } catch { /* ignore */ }
+  }
   mem.inflight = (async () => {
     let bestipRows = [];
     let uouinRows = [];
@@ -340,11 +352,16 @@ export async function getLivePreferred(env, settings, force = false) {
       return true;
     });
 
-    // Rotating probe window so the whole pool is covered over time.
+    // Custom (pinned) entries are re-verified every window, cfnew-style; the
+    // rest of the window rotates through the remote sources so the whole pool
+    // is covered over time.
+    const isCustom = (e) => e && e.name === "自定义优选";
+    const head = unique.filter(isCustom).slice(0, PREF_PROBE_CAP);
+    const rest = unique.filter((e) => !isCustom(e));
     const window = Math.floor(Date.now() / PREF_TTL_MS);
-    const start = unique.length ? (window * PREF_PROBE_CAP) % unique.length : 0;
-    const head = [];
-    for (let i = 0; i < Math.min(PREF_PROBE_CAP, unique.length); i++) head.push(unique[(start + i) % unique.length]);
+    const start = rest.length ? (window * PREF_PROBE_CAP) % rest.length : 0;
+    const restSlots = Math.max(0, PREF_PROBE_CAP - head.length);
+    for (let i = 0; i < Math.min(restSlots, rest.length); i++) head.push(rest[(start + i) % rest.length]);
 
     const pairs = [];
     for (const c of head) for (const p of expandPairs(c, settings)) pairs.push(p);
@@ -352,7 +369,21 @@ export async function getLivePreferred(env, settings, force = false) {
       const ms = await probePair(p.host, p.port);
       return { ...p, ms, ok: ms >= 0 };
     });
-    const live = probed.filter((r) => r.ok).sort((a, b) => a.ms - b.ms).slice(0, PREF_LIVE_CAP);
+    let live = probed.filter((r) => r.ok).sort((a, b) => a.ms - b.ms).slice(0, PREF_LIVE_CAP);
+
+    // Carry forward the previous live pairs (re-rank without probing) so the
+    // pool never collapses when a probe window happens to catch many dead
+    // candidates — the client only re-resolves nodes on the next refresh.
+    if (prev && prev.live && prev.live.length) {
+      const seen2 = new Set(live.map((p) => pairKey(p)));
+      const carried = prev.live.filter((p) => {
+        const k = pairKey(p);
+        if (seen2.has(k)) return false;
+        seen2.add(k);
+        return true;
+      });
+      live = live.concat(carried).slice(0, PREF_LIVE_CAP);
+    }
 
     const value = { at: Math.floor(Date.now() / 1000), poolSize: unique.length, probedCount: pairs.length, live };
     mem.at = Date.now();

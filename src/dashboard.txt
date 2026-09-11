@@ -252,7 +252,7 @@ function settingsTab() {
   }
   return '<div class="card"><h2>تنظیمات اتصال و اشتراک (موتور cfnew)</h2>' +
     '<p class="muted" style="margin-bottom:8px">تغییرات سمت Worker اعمال می‌شوند؛ کاربر نهایی فقط اشتراک خود را Refresh می‌کند.</p>' +
-    '<div class="kv"><div><label>آدرس‌های دلخواه (cfnew yx — هر خط یک دامنه یا IP:Port؛ خالی = منابع زنده)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
+    '<div class="kv"><div><label>آدرس‌های دلخواه (cfnew yx — هر خط یک دامنه یا IP:Port؛ با منابع زنده ترکیب می‌شود)</label><textarea id="s-ips" class="ltr" rows="4">' + escHtml((settings.cleanIps || []).join('\n')) + '</textarea></div>' +
     '<div><label>پورت‌های TLS برای آدرس‌های بدون پورت (با کاما)</label><input id="s-ports" class="ltr" value="' + escHtml((settings.ports || []).join(', ')) + '">' +
     '<label>حالت خروجی (مسیرهای کشوری)</label><select id="s-outbound"><option value="proxy-first"' + (settings.outboundMode === 'proxy-first' ? ' selected' : '') + '>اول پروکسی، سپس مستقیم</option><option value="direct-first"' + (settings.outboundMode === 'direct-first' ? ' selected' : '') + '>اول مستقیم، سپس پروکسی</option><option value="proxy-only"' + (settings.outboundMode === 'proxy-only' ? ' selected' : '') + '>فقط پروکسی (بدون نشت خروجی)</option></select></div>' +
     '<div><label>ALPN (اختیاری)</label><select id="s-alpn" multiple size="3"><option value="h3"' + (alpn.indexOf('h3') >= 0 ? ' selected' : '') + '>h3</option><option value="h2"' + (alpn.indexOf('h2') >= 0 ? ' selected' : '') + '>h2</option><option value="http/1.1"' + (alpn.indexOf('http/1.1') >= 0 ? ' selected' : '') + '>http/1.1</option></select></div>' +

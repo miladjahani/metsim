@@ -224,13 +224,26 @@ const PORT_DEFAULTS = [443];
 const DEFAULT_DNS_URL = "https://223.5.5.5/dns-query";
 const ALPN_VALUES = new Set(["h3", "h2", "http/1.1"]);
 
+// cleanIps entries auto-filled by the pre-cfnew engine (the old static edge
+// pool). They read as "custom preferred" now and would hijack the live
+// sources, so they are dropped on load; genuinely manual addresses are kept.
+const LEGACY_AUTO_CLEANIPS = new Set([
+  "172.71.218.190", "162.158.228.87", "162.158.189.134", "162.158.26.63",
+  "162.158.25.86", "162.158.29.216", "162.158.218.160", "162.158.227.214",
+  "172.69.118.198", "172.69.119.150",
+]);
+
 function normalizeSettings(s) {
   s = s && typeof s === "object" ? s : {};
   const ports = Array.isArray(s.ports)
     ? s.ports.map(Number).filter((p) => p > 0 && p < 65536).slice(0, 6)
     : PORT_DEFAULTS.slice();
   const cleanIps = Array.isArray(s.cleanIps)
-    ? s.cleanIps.map((x) => String(x).trim()).filter(Boolean).slice(0, 40)
+    ? s.cleanIps
+      .map((x) => String(x).trim())
+      .filter(Boolean)
+      .filter((x) => !LEGACY_AUTO_CLEANIPS.has(parseEndpoint(x, 443)?.host || x))
+      .slice(0, 40)
     : [];
   const alpn = Array.isArray(s.alpn)
     ? s.alpn.map((x) => String(x).trim()).filter((x) => ALPN_VALUES.has(x)).slice(0, 3)
@@ -654,10 +667,13 @@ export async function nodesForUser(env, u, domain, settings) {
   const counters = new Map();
   const nodes = [];
   for (const pair of (live.live || []).slice(0, 10)) {
-    const base = nodeBaseName(pair);
-    counters.set(base, (counters.get(base) || 0) + 1);
-    const name = base + "-" + String(counters.get(base)).padStart(2, "0");
     for (const code of countries) {
+      const base = nodeBaseName(pair);
+      // Per-country counters: with 2 countries × the same address, both get
+      // "...-01" once for each route instead of one bare tag + "(1)(2)".
+      const ck = code + "\u0000" + base;
+      counters.set(ck, (counters.get(ck) || 0) + 1);
+      const name = base + "-" + String(counters.get(ck)).padStart(2, "0") + (code ? "-" + String(code).toUpperCase() : "");
       const path = code ? "/route/" + encodeURIComponent(String(code).toLowerCase()) : "/?ed=2048";
       nodes.push({
         tag: (u.remark || "user") + "-" + name,

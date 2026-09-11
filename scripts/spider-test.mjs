@@ -101,8 +101,9 @@ let subToken = "";
   const body = await pub.text();
   const decoded = Buffer.from(body, "base64").toString("utf8");
   check("VLESS subscription is base64", pub.status === 200 && decoded.includes("vless://" + uuid + "@"));
-  check("cfnew link shape (fp/ech/ed/eh)", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("fp=chrome") && decoded.includes("ech=" + encodeURIComponent("cloudflare-ech.com+https://223.5.5.5/dns-query")) && decoded.includes("&ed=2048") && decoded.includes("&eh=Sec-WebSocket-Protocol") && !decoded.includes("fragment=") && !decoded.includes("cdn"));
-  check("cfnew node naming", decoded.includes("%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BC%98%E9%80%89-01") || decoded.includes("%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BC%98%E9%80%89-02"));
+  check("cfnew link shape (fp/ech/ed/eh)", decoded.includes("@1.1.1.1:443?") && decoded.includes("alpn=h2") && decoded.includes("fp=chrome") && decoded.includes("ech=" + encodeURIComponent("cloudflare-ech.com+https://223.5.5.5/dns-query")) && decoded.includes("&ed=2048") && decoded.includes("&eh=Sec-WebSocket-Protocol") && !/(?:\?|&)fragment=/.test(decoded) && !/(?:\?|&)cdn=/.test(decoded));
+  check("cfnew node naming", /%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BC%98%E9%80%89-0[12]/.test(decoded) || /IPv4%E4%BC%98%E9%80%89-0\d/.test(decoded) || /%E4%BC%98%E9%80%89%E5%9F%9F%E5%90%8D-0\d/.test(decoded));
+  check("no duplicate raw tags", (() => { const tags = decoded.split("\n").map((l) => { const i = l.lastIndexOf("#"); return i >= 0 ? l.slice(i + 1) : ""; }); return tags.length > 0 && new Set(tags).size === tags.length; })());
   check("country routes remain multi-location", decoded.includes("route%2Fde") && decoded.includes("route%2Ftr"));
 
   // Preferred pool: with custom cleanIps set, custom entries replace remote
